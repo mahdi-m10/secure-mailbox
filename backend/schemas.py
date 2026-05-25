@@ -27,8 +27,13 @@ class UserCreate(BaseModel):
 class UserLogin(BaseModel):
     """Payload for POST /auth/login."""
 
-    username: str
-    password: str
+    # max_length caps are purely a DoS guard: an attacker sending a 10 MB
+    # password string would force the server to run Argon2id over it (64 MB RAM
+    # per attempt × unbounded string length). We do NOT add min_length here —
+    # short/wrong credentials should fail with "Invalid credentials", not a
+    # Pydantic 422, so we don't leak which field is wrong via the error path.
+    username: str = Field(..., max_length=64)
+    password: str = Field(..., max_length=128)
 
 
 class UserResponse(BaseModel):
@@ -119,3 +124,43 @@ class MessageOut(BaseModel):
     """Generic success message envelope."""
 
     detail: str
+
+
+# ===========================================================================
+# Auth operation schemas
+# ===========================================================================
+
+class LogoutRequest(BaseModel):
+    """Body for POST /auth/logout — identifies which session to invalidate."""
+
+    # The raw opaque refresh token returned at login.  The server hashes it
+    # (SHA-256) and looks up the matching row in the sessions table.
+    # Requiring it here ensures logout is tied to a specific device/session
+    # rather than blindly wiping all sessions.
+    refresh_token: str = Field(
+        ...,
+        min_length=1,
+        description="The opaque refresh token issued at login.",
+    )
+
+
+class PasswordChange(BaseModel):
+    """Body for PUT /auth/password — change the authenticated user's password."""
+
+    # We verify old_password before accepting the change to prevent account
+    # takeover on an unattended screen.  max_length prevents DoS via the
+    # Argon2id verify call; we deliberately skip min_length so the error is
+    # "Current password is incorrect" rather than a Pydantic 422.
+    old_password: str = Field(
+        ...,
+        max_length=128,
+        description="The user's current password (required for verification).",
+    )
+
+    # New password enforces the same policy as registration: 8–128 chars.
+    new_password: str = Field(
+        ...,
+        min_length=8,
+        max_length=128,
+        description="The desired new password (min 8, max 128 characters).",
+    )

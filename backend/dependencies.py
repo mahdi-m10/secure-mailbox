@@ -12,6 +12,7 @@ Environment variables (loaded from .env via python-dotenv):
 """
 
 import os
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -74,8 +75,16 @@ def _decode_access_token(token: str) -> TokenData:
         payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
         user_id: int | None = payload.get("sub")
         username: str | None = payload.get("username")
-        if user_id is None:
+        token_type: str | None = payload.get("type")
+
+        # Reject missing subject OR wrong token type.
+        # The type guard prevents a refresh token (type="refresh") from being
+        # accepted as an access token — a "confused deputy" / token-confusion
+        # attack that would let an attacker with only a refresh token call
+        # protected endpoints.
+        if user_id is None or token_type != "access":
             raise credentials_exception
+
         return TokenData(user_id=int(user_id), username=username)
     except JWTError:
         raise credentials_exception
@@ -128,3 +137,54 @@ def get_optional_user(
         return get_current_user(token=token, db=db)
     except HTTPException:
         return None
+
+
+# ---------------------------------------------------------------------------
+# Token factory — used by the login endpoint to issue access tokens
+# ---------------------------------------------------------------------------
+
+def create_access_token(
+    user_id: int,
+    username: str,
+    expires_delta: timedelta | None = None,
+) -> str:
+    """
+    Build and sign a JWT access token for the given user.
+
+    Payload claims
+    --------------
+    sub      — user ID as a string (RFC 7519 §4.1.2: "sub" SHOULD be a string)
+    username — convenience claim; avoids an extra DB round-trip in simple reads
+    iat      — issued-at timestamp (UTC)
+    exp      — expiry timestamp (UTC); defaults to ACCESS_TOKEN_EXPIRE_MINUTES
+    type     — literal "access"; guards against refresh tokens being used here
+               (checked in _decode_access_token)
+
+    Parameters
+    ----------
+    user_id:
+        Primary key of the authenticated user.
+    username:
+        Username string embedded as a convenience claim.
+    expires_delta:
+        Custom lifetime.  Defaults to ACCESS_TOKEN_EXPIRE_MINUTES from .env.
+
+    Returns
+    -------
+    str
+        A signed, compact JWT string ready to return in the Token response.
+    """
+    now = datetime.now(timezone.utc)
+    expire = now + (expires_delta or timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES))
+
+    payload: dict = {
+        "sub": str(user_id),   # string per RFC 7519
+        "username": username,
+        "iat": now,
+        "exp": expire,
+        # Explicit type discriminator — _decode_access_token rejects anything
+        # other than "access" so a refresh token cannot be used as an access
+        # token even if it were somehow a valid JWT.
+        "type": "access",
+    }
+    return jwt.encode(payload, SECRET_KEY, algorithm=ALGORITHM)

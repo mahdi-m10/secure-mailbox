@@ -4,8 +4,9 @@ schemas.py — Pydantic v2 request / response models.
 Keeps API contracts separate from database models.
 """
 
+import base64
 from datetime import datetime
-from pydantic import BaseModel, EmailStr, Field, ConfigDict
+from pydantic import BaseModel, EmailStr, Field, ConfigDict, field_validator
 
 
 # ===========================================================================
@@ -164,3 +165,184 @@ class PasswordChange(BaseModel):
         max_length=128,
         description="The desired new password (min 8, max 128 characters).",
     )
+
+
+# ===========================================================================
+# Message operation schemas
+# ===========================================================================
+
+class MessageSend(BaseModel):
+    """Body for POST /messages/send — send an encrypted message."""
+
+    recipient_username: str = Field(
+        ...,
+        min_length=1,
+        max_length=64,
+        description="Username of the intended recipient.",
+    )
+
+    # The ciphertext is whatever the client's AES-256-GCM encrypt() call
+    # produced — the raw encrypted bytes, base64-encoded.  The server stores
+    # this opaquely; it never decrypts it.
+    ciphertext: str = Field(
+        ...,
+        description="Base64-encoded AES-256-GCM ciphertext (without the nonce).",
+    )
+
+    # The nonce is stored separately so the download response can return it
+    # as a named field without requiring the client to know the storage layout.
+    # Must decode to exactly 12 bytes (96-bit GCM nonce).
+    nonce: str = Field(
+        ...,
+        description="Base64-encoded 12-byte (96-bit) AES-256-GCM nonce.",
+    )
+
+    # The server enforces the canonical AAD convention
+    # "v1:sender={id}:recipient={id}:msg={id}" and returns it in the download
+    # response.  This field is accepted from the client for documentation and
+    # may be used in future for client-side verification, but the server
+    # always computes the authoritative value from message metadata.
+    associated_data: str | None = Field(
+        default=None,
+        description=(
+            "Associated data used by the client for AEAD. The server computes "
+            "the canonical AAD from message metadata; this field is informational."
+        ),
+    )
+
+    # Wrapped (public-key-encrypted) copy of the message's symmetric key,
+    # so the recipient can unwrap it with their private key and then decrypt
+    # the ciphertext.  The server never sees the raw symmetric key.
+    encrypted_key: str | None = Field(
+        default=None,
+        description=(
+            "Base64-encoded message symmetric key encrypted with the "
+            "recipient's public key."
+        ),
+    )
+
+    subject: str | None = Field(
+        default=None,
+        max_length=512,
+        description="Optional subject line (may itself be client-side encrypted).",
+    )
+
+    @field_validator("nonce")
+    @classmethod
+    def _nonce_must_decode_to_12_bytes(cls, v: str) -> str:
+        try:
+            raw = base64.b64decode(v, validate=True)
+        except Exception:
+            raise ValueError("nonce must be valid base64.")
+        if len(raw) != 12:
+            raise ValueError(
+                f"nonce must decode to exactly 12 bytes (AES-256-GCM); got {len(raw)}."
+            )
+        return v
+
+    @field_validator("ciphertext")
+    @classmethod
+    def _ciphertext_must_contain_tag(cls, v: str) -> str:
+        try:
+            raw = base64.b64decode(v, validate=True)
+        except Exception:
+            raise ValueError("ciphertext must be valid base64.")
+        # AES-256-GCM appends a 16-byte authentication tag; even an empty
+        # plaintext produces exactly 16 bytes of output.
+        if len(raw) < 16:
+            raise ValueError(
+                "ciphertext is too short to contain a valid GCM authentication tag "
+                "(minimum 16 bytes)."
+            )
+        return v
+
+
+class ForwardRequest(BaseModel):
+    """Body for POST /messages/{id}/forward."""
+
+    recipient_username: str = Field(
+        ...,
+        min_length=1,
+        max_length=64,
+        description="Username of the user to forward the message to.",
+    )
+
+    # The forwarder must decrypt the message_key with their own private key,
+    # re-encrypt it with the new recipient's public key, and supply it here.
+    # Without this, the new recipient cannot decrypt the ciphertext.
+    encrypted_key: str | None = Field(
+        default=None,
+        description=(
+            "Message symmetric key re-wrapped with the new recipient's public key."
+        ),
+    )
+
+
+class RevokeRequest(BaseModel):
+    """Body for POST /messages/{id}/revoke — revoke message access."""
+
+    # If provided, revoke only this recipient's access (delete their
+    # message_access row).  If omitted, revoke for all recipients by
+    # soft-deleting the message entirely (is_deleted = True).
+    recipient_username: str | None = Field(
+        default=None,
+        description=(
+            "Target recipient username. If omitted, access is revoked for all "
+            "recipients (full soft-delete)."
+        ),
+    )
+
+
+class MessageListItem(BaseModel):
+    """One summary item in an inbox or sent-messages listing.
+
+    Does NOT include the ciphertext — that is only returned by the download
+    endpoint.  This keeps the listing lightweight and prevents the server
+    from accidentally returning large encrypted blobs in bulk responses.
+    """
+
+    id: int
+    sender_id: int | None
+    sender_username: str | None
+    subject: str | None
+    is_read: bool
+    is_deleted: bool
+    created_at: datetime
+
+
+class MessageDownloadResponse(BaseModel):
+    """Full message payload returned by GET /messages/{id}/download.
+
+    Contains everything the recipient needs to decrypt the message:
+      - ciphertext  — the stored blob (nonce prepended, base64)
+      - nonce       — extracted from the blob for convenience
+      - associated_data — the canonical AAD string; pass this to decrypt()
+      - encrypted_key   — the recipient's wrapped symmetric key
+    """
+
+    id: int
+    sender_id: int | None
+    sender_username: str | None
+
+    # The combined stored blob: base64(nonce_bytes ‖ ciphertext_with_tag).
+    # The first 12 decoded bytes are the nonce; the rest is the ciphertext.
+    ciphertext: str
+
+    # Convenience field: the nonce extracted from the first 12 bytes of
+    # the decoded ciphertext blob, re-encoded as base64.
+    nonce: str
+
+    # Canonical AAD string computed by the server:
+    #   "v1:sender={sender_id}:recipient={recipient_id}:msg={message_id}"
+    # Pass this verbatim as associated_data to your AEAD decrypt() call.
+    associated_data: str
+
+    # The recipient's copy of the wrapped symmetric key.  Decrypt with your
+    # private key to recover the message_key, then use message_key + nonce +
+    # associated_data to decrypt the ciphertext.
+    encrypted_key: str | None
+
+    subject: str | None
+    integrity_hash: str | None
+    is_read: bool
+    created_at: datetime

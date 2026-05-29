@@ -14,7 +14,7 @@ components available in the ``cryptography`` library:
 Public API
 ----------
   generate_keypair()                            -> (private_key, public_key)
-  encapsulate(recip_pub, sender_priv, pt, info) -> (ciphertext, enc_key)
+  encapsulate(recip_pub, sender_priv, pt, info) -> (ciphertext, enc_key, nonce)
   decapsulate(recip_priv, sender_pub, ct, enc, info) -> plaintext
 
 Why not use Mode_Base?
@@ -380,7 +380,12 @@ def encapsulate(
     # ------------------------------------------------------------------
     ciphertext = AESGCM(aes_key).encrypt(nonce, plaintext, None)
 
-    return ciphertext, enc
+    # Return nonce alongside ciphertext and the encapsulated key so callers
+    # that submit to the messages API (which requires a separate nonce field)
+    # can include it without re-running the key schedule.
+    # The recipient never uses the transmitted nonce — they re-derive it from
+    # the same HKDF inputs and verify it implicitly via the GCM tag.
+    return ciphertext, enc, nonce
 
 
 def decapsulate(

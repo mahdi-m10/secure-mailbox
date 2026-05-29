@@ -12,6 +12,7 @@ from backend.database import engine
 from backend import models
 from backend.routers import auth as auth_router
 from backend.routers import messages as messages_router
+from backend.routers import users as users_router
 
 # ---------------------------------------------------------------------------
 # Create all tables on startup (safe to call repeatedly – only creates new
@@ -45,6 +46,7 @@ app.add_middleware(
 
 app.include_router(auth_router.router)
 app.include_router(messages_router.router)
+app.include_router(users_router.router)
 
 
 # ---------------------------------------------------------------------------

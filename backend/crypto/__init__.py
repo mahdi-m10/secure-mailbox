@@ -24,6 +24,13 @@ Key derivation (HKDF-SHA256):
   INFO_SESSION_KEY        — info constant: session handshake key
   INFO_HEADER_ENCRYPTION  — info constant: header field encryption key
   MAX_DERIVE_LENGTH       — maximum bytes derive_key() can produce (8 160)
+
+HPKE Mode_Auth (DHKEM-X25519 + HKDF-SHA256 + AES-256-GCM):
+  generate_keypair      — generate an X25519 static key pair (priv, pub)
+  encapsulate           — authenticated hybrid encrypt; returns (ct, enc_key)
+  decapsulate           — authenticated hybrid decrypt; raises ValueError on fail
+  HPKE_KEY_SIZE         — X25519 key size in bytes (32)
+  HPKE_ENCAPSULATED_SIZE — encapsulated (ephemeral public) key size in bytes (32)
 """
 
 from backend.crypto.password import (
@@ -47,6 +54,13 @@ from backend.crypto.kdf import (
     INFO_HEADER_ENCRYPTION,
     MAX_DERIVE_LENGTH,
 )
+from backend.crypto.hpke import (
+    generate_keypair,
+    encapsulate,
+    decapsulate,
+    KEY_SIZE   as HPKE_KEY_SIZE,
+    ENCAPSULATED_KEY_SIZE as HPKE_ENCAPSULATED_SIZE,
+)
 
 __all__ = [
     # password
@@ -67,4 +81,10 @@ __all__ = [
     "INFO_SESSION_KEY",
     "INFO_HEADER_ENCRYPTION",
     "MAX_DERIVE_LENGTH",
+    # hpke
+    "generate_keypair",
+    "encapsulate",
+    "decapsulate",
+    "HPKE_KEY_SIZE",
+    "HPKE_ENCAPSULATED_SIZE",
 ]

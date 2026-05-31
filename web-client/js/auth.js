@@ -11,7 +11,7 @@
 
 import { generateKeyPair, saveKeyPair, hasKeyPair, migrateLocalStorageKey } from './crypto.js';
 
-const API = 'http://localhost:8000';
+const API = 'https://team10.theburkenator.com';
 
 // ---------- Session helpers ---------------------------------------------------
 

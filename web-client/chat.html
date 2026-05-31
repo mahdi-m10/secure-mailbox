@@ -1,0 +1,138 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>SecureMsg</title>
+  <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+
+<div class="app-layout">
+
+  <!-- ══════════════════════════════════════════
+       SIDEBAR
+  ══════════════════════════════════════════ -->
+  <aside class="sidebar">
+
+    <div class="sidebar-header">
+      <div class="sidebar-logo">
+        <div class="logo-icon">🔐</div>
+        <h1>SecureMsg</h1>
+      </div>
+      <div class="user-chip">
+        <div class="user-avatar" id="user-avatar">?</div>
+        <span class="user-chip-name" id="username-display"></span>
+        <button id="logout-btn" class="btn btn-ghost btn-sm">Sign out</button>
+      </div>
+    </div>
+
+    <nav class="sidebar-nav">
+      <button class="nav-tab active" data-tab="inbox">
+        Inbox <span class="badge" id="unread-badge" style="display:none">0</span>
+      </button>
+      <button class="nav-tab" data-tab="sent">Sent</button>
+      <button class="nav-tab" data-tab="compose">Compose</button>
+    </nav>
+
+    <div class="message-list" id="message-list">
+      <div class="message-list-loading">Loading…</div>
+    </div>
+
+  </aside><!-- /.sidebar -->
+
+
+  <!-- ══════════════════════════════════════════
+       MAIN PANEL
+  ══════════════════════════════════════════ -->
+  <main class="message-panel">
+
+    <!-- ── Compose panel ── -->
+    <div id="compose-panel" class="panel hidden">
+      <div class="compose-card">
+        <h2>New Message</h2>
+        <form id="compose-form" novalidate>
+
+          <div class="form-group">
+            <label for="recipient">To</label>
+            <div class="recipient-wrapper">
+              <input id="recipient" type="text"
+                     placeholder="Recipient username"
+                     autocomplete="off" required>
+              <div id="recipient-suggestions" class="suggestions"></div>
+            </div>
+          </div>
+
+          <div class="form-group">
+            <label for="subject">Subject <span style="color:var(--slate-400);font-weight:400">(optional)</span></label>
+            <input id="subject" type="text"
+                   placeholder="Subject line"
+                   maxlength="512">
+          </div>
+
+          <div class="form-group">
+            <label for="message-body">Message</label>
+            <textarea id="message-body"
+                      placeholder="Type your message here…"
+                      rows="9" required></textarea>
+          </div>
+
+          <div class="compose-actions">
+            <button type="submit" id="send-btn" class="btn btn-primary">🔒 Send Encrypted</button>
+            <span class="encrypt-note">🛡 AES-256-GCM end-to-end encryption</span>
+          </div>
+
+          <div id="compose-status" class="alert" style="display:none"></div>
+
+        </form>
+      </div>
+    </div><!-- /#compose-panel -->
+
+
+    <!-- ── Message view panel ── -->
+    <div id="message-view-panel" class="panel hidden">
+      <div class="msg-view-card">
+
+        <div class="msg-view-header">
+          <button id="back-btn" class="btn btn-ghost btn-sm">← Back</button>
+          <span class="msg-view-subject" id="msg-subject"></span>
+        </div>
+
+        <div class="msg-meta">
+          <span id="msg-from"></span>
+          <span id="msg-date"></span>
+        </div>
+
+        <div class="msg-body">
+          <div class="msg-ciphertext-preview" id="msg-ciphertext-preview" title="Encrypted ciphertext — click Decrypt to read"></div>
+          <div class="msg-plaintext hidden" id="msg-plaintext"></div>
+          <div id="msg-decrypt-error" class="alert" style="display:none"></div>
+        </div>
+
+        <div class="msg-view-footer">
+          <button id="decrypt-btn" class="btn btn-primary">🔓 Decrypt Message</button>
+          <span class="integrity-note" id="msg-integrity"></span>
+          <a href="verify.html" class="btn btn-ghost btn-sm" style="margin-left:auto">Verify integrity →</a>
+        </div>
+
+      </div>
+    </div><!-- /#message-view-panel -->
+
+
+    <!-- ── Empty / welcome state ── -->
+    <div id="empty-panel" class="panel">
+      <div class="empty-state">
+        <div class="empty-state-icon">✉️</div>
+        <p>Select a message to read, or compose a new one.</p>
+        <small>All messages are end-to-end encrypted with AES-256-GCM.</small>
+        <button id="new-msg-btn" class="btn btn-primary" style="margin-top:8px">Compose Message</button>
+      </div>
+    </div>
+
+  </main><!-- /.message-panel -->
+
+</div><!-- /.app-layout -->
+
+<script type="module" src="js/chat.js"></script>
+</body>
+</html>

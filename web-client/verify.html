@@ -1,0 +1,129 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>SecureMsg — Verify Integrity</title>
+  <link rel="stylesheet" href="css/style.css">
+</head>
+<body class="verify-page">
+
+  <!-- ── Navbar ── -->
+  <nav class="verify-navbar">
+    <a href="chat.html" class="nav-logo">
+      <div class="logo-icon">🔐</div>
+      SecureMsg
+    </a>
+    <div class="nav-links">
+      <a href="chat.html">Inbox</a>
+      <a href="index.html">Sign out</a>
+    </div>
+  </nav>
+
+  <!-- ── Main content ── -->
+  <main class="verify-main">
+    <div class="verify-container">
+
+      <h1>Blockchain Verification</h1>
+      <p>
+        Verify that a message's encrypted payload has not been altered since it was
+        recorded. The server stores a SHA-256 hash of each message's ciphertext blob
+        at send time. This tool recomputes that hash and compares it to the stored record.
+      </p>
+
+      <!-- Auth warning (shown when not logged in) -->
+      <div id="auth-warning" class="auth-warning" style="display:none">
+        ⚠ You are not signed in. You can only verify messages you have access to.
+        <a href="index.html" class="btn btn-primary btn-sm" style="margin-left:auto">Sign In</a>
+      </div>
+
+      <!-- Lookup form -->
+      <div class="verify-card">
+        <h2>Enter Message Details</h2>
+        <form id="verify-form" novalidate>
+          <div class="form-group">
+            <label for="verify-msg-id">Message ID</label>
+            <input id="verify-msg-id" type="number" min="1" step="1"
+                   placeholder="e.g. 42"
+                   required>
+          </div>
+
+          <div id="verify-error" class="alert alert-error" style="display:none"></div>
+
+          <div class="verify-btn-row">
+            <button type="submit" id="verify-btn" class="btn btn-primary">
+              Verify Integrity
+            </button>
+            <span style="font-size:12px;color:var(--slate-400)">
+              Requires access to the message
+            </span>
+          </div>
+        </form>
+      </div>
+
+      <!-- ── Result card (hidden until a check runs) ── -->
+      <div id="verify-result" class="verify-result">
+        <div class="verify-result-card">
+
+          <!-- Pass / Fail banner -->
+          <div id="result-banner" class="result-banner">
+            <div id="result-icon" class="result-icon"></div>
+            <div>
+              <div id="result-title"    class="result-title"></div>
+              <div id="result-subtitle" class="result-subtitle"></div>
+            </div>
+          </div>
+
+          <div class="result-details">
+
+            <!-- Hash comparison -->
+            <div class="result-section-label">Integrity Hash Comparison</div>
+
+            <div class="hash-row">
+              <label>Stored hash (server record)</label>
+              <div id="hash-stored" class="hash-value"></div>
+            </div>
+            <div class="hash-row">
+              <label>Computed hash (SHA-256 of retrieved ciphertext)</label>
+              <div id="hash-computed" class="hash-value"></div>
+            </div>
+
+            <!-- Message metadata -->
+            <div class="result-section-label" style="margin-top:20px">Message Metadata</div>
+            <div class="meta-grid">
+              <div class="meta-item">
+                <label>Message ID</label>
+                <span id="meta-msg-id">—</span>
+              </div>
+              <div class="meta-item">
+                <label>Sender</label>
+                <span id="meta-sender">—</span>
+              </div>
+              <div class="meta-item">
+                <label>Timestamp</label>
+                <span id="meta-timestamp">—</span>
+              </div>
+              <div class="meta-item">
+                <label>Read</label>
+                <span id="meta-read">—</span>
+              </div>
+              <div class="meta-item wide">
+                <label>Subject</label>
+                <span id="meta-subject">—</span>
+              </div>
+              <div class="meta-item wide">
+                <label>Canonical AAD (Associated Data)</label>
+                <code class="mono" id="meta-aad">—</code>
+              </div>
+            </div>
+
+          </div><!-- /.result-details -->
+        </div><!-- /.verify-result-card -->
+      </div><!-- /#verify-result -->
+
+    </div><!-- /.verify-container -->
+  </main>
+
+  <script type="module" src="js/verify.js"></script>
+</body>
+</html>

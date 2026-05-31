@@ -1,0 +1,87 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>SecureMsg — Sign In</title>
+  <link rel="stylesheet" href="css/style.css">
+</head>
+<body class="auth-page">
+
+  <div class="auth-card">
+
+    <div class="auth-header">
+      <div class="auth-logo">
+        <div class="logo-icon">🔐</div>
+        <h1>SecureMsg</h1>
+      </div>
+      <p>End-to-end encrypted messaging</p>
+    </div>
+
+    <div class="auth-tabs">
+      <button class="auth-tab active" data-target="login-form">Sign In</button>
+      <button class="auth-tab"        data-target="register-form">Create Account</button>
+    </div>
+
+    <div class="auth-body">
+
+      <!-- ── Login ── -->
+      <form id="login-form" class="auth-form active" novalidate>
+        <div class="form-group">
+          <label for="login-username">Username</label>
+          <input id="login-username" type="text"
+                 placeholder="Your username"
+                 autocomplete="username"
+                 maxlength="64" required>
+        </div>
+        <div class="form-group">
+          <label for="login-password">Password</label>
+          <input id="login-password" type="password"
+                 placeholder="Your password"
+                 autocomplete="current-password"
+                 maxlength="128" required>
+        </div>
+        <div id="login-status" class="alert" style="display:none"></div>
+        <button type="submit" class="btn btn-primary btn-full">Sign In</button>
+      </form>
+
+      <!-- ── Register ── -->
+      <form id="register-form" class="auth-form" novalidate>
+        <div class="form-group">
+          <label for="reg-username">Username</label>
+          <input id="reg-username" type="text"
+                 placeholder="Choose a username (3–64 chars)"
+                 autocomplete="off"
+                 minlength="3" maxlength="64" required>
+        </div>
+        <div class="form-group">
+          <label for="reg-email">Email address</label>
+          <input id="reg-email" type="email"
+                 placeholder="you@example.com"
+                 autocomplete="email" required>
+        </div>
+        <div class="form-group">
+          <label for="reg-password">Password</label>
+          <input id="reg-password" type="password"
+                 placeholder="At least 8 characters"
+                 autocomplete="new-password"
+                 minlength="8" maxlength="128" required>
+        </div>
+        <div id="register-status" class="alert" style="display:none"></div>
+        <button type="submit" class="btn btn-primary btn-full">Create Account</button>
+      </form>
+
+    </div><!-- /.auth-body -->
+
+    <div class="auth-footer">
+      <p class="key-note">
+        🔑 &nbsp;
+        <span>Encryption keys are generated locally and never sent to the server.</span>
+      </p>
+    </div>
+
+  </div><!-- /.auth-card -->
+
+  <script type="module" src="js/auth.js"></script>
+</body>
+</html>

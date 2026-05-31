@@ -12,7 +12,7 @@
 
 import { sha256Hex } from './crypto.js';
 
-const API = 'http://localhost:8000';
+const API = 'https://team10.theburkenator.com';
 
 const getToken = () => localStorage.getItem('sm_token');
 

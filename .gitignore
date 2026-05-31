@@ -58,3 +58,10 @@ dmypy.json
 *.tar.gz
 *.whl
 MANIFEST
+
+# ── Blockchain / Hardhat build artifacts ─────────────────────
+node_modules/
+blockchain/node_modules/
+blockchain/artifacts/
+blockchain/cache/
+blockchain/.env

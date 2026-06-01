@@ -404,7 +404,8 @@ def get_inbox(
         )
         .where(
             models.MessageAccess.recipient_id == current_user.id,
-            models.Message.is_deleted.is_(False),
+            # is_deleted is a sender-side flag only; recipients retain inbox
+            # visibility even after the sender deletes their copy.
         )
         .order_by(models.Message.created_at.desc())
         .offset(skip)
@@ -636,9 +637,18 @@ def revoke_message(
     _require_sender(message, current_user)
 
     if body.recipient_username is None:
-        # Full revocation: soft-delete the message for everyone.
-        message.is_deleted = True
-        db.add(message)
+        # Full revocation: remove every MessageAccess row so no recipient can
+        # download the message.  The message row, ciphertext, and blockchain
+        # record are intentionally preserved — revocation is an access-control
+        # action, not a deletion.  is_deleted is NOT set so the sender can still
+        # see the message in their sent list (the frontend shows "Access revoked").
+        access_rows = db.scalars(
+            select(models.MessageAccess).where(
+                models.MessageAccess.message_id == message.id
+            )
+        ).all()
+        for row in access_rows:
+            db.delete(row)
         db.commit()
         return {"detail": "Message access revoked for all recipients."}
 
@@ -694,8 +704,27 @@ def download_message(
     Marks the message as read in `message_access` (only for recipients;
     senders are implicitly always "read").
     """
-    message = _load_active_message(message_id, db)
-    access  = _require_read_access(message, current_user, db)
+    # Load the raw message row without the is_deleted gate so that recipients
+    # can still download a message the sender soft-deleted (delete is sender-only).
+    message = db.get(models.Message, message_id)
+    if message is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND,
+                            detail="Message not found.")
+
+    if message.sender_id == current_user.id:
+        # Sender: is_deleted hides the message from their own view.
+        if message.is_deleted:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND,
+                                detail="Message not found.")
+        access = None
+    else:
+        # Recipient: access is controlled solely by the MessageAccess row.
+        # A missing row means either the message never existed for them, or
+        # access was revoked — both surface as 404 to prevent IDOR.
+        access = _get_access_record(message.id, current_user.id, db)
+        if access is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND,
+                                detail="Message not found.")
 
     # ------------------------------------------------------------------
     # Split the stored blob into nonce and ciphertext.

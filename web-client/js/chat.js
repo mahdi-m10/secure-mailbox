@@ -385,7 +385,11 @@ async function handleDeleteMessage(msgId, bubbleWrap) {
 
 async function handleRevokeMessage(msgId, bubbleWrap) {
   try {
-    const res = await authFetch(`${API}/messages/${msgId}/revoke`, { method: 'POST' });
+    const res = await authFetch(`${API}/messages/${msgId}/revoke`, {
+      method:  'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body:    JSON.stringify({}),   // empty body → recipient_username=None → full revocation
+    });
     if (res.status === 401) { clearSession(); window.location.href = 'index.html'; return; }
     if (!res.ok) {
       const body = await res.json().catch(() => ({}));

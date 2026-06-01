@@ -360,6 +360,7 @@ class MessageListItem(BaseModel):
     id: int
     sender_id: int | None
     sender_username: str | None
+    recipient_username: str | None = None   # populated for sent listings; None for inbox
     subject: str | None
     is_read: bool
     is_deleted: bool

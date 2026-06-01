@@ -32,6 +32,7 @@ function authFetch(url, opts = {}) {
 // ── State ──────────────────────────────────────────────────────────────────────
 
 let allInboxMessages = [];   // full inbox, loaded once
+let allSentMessages  = [];   // full sent box, loaded once
 let currentSender    = null; // sender username of open conversation
 let allUsers         = [];   // user list for autocomplete
 
@@ -77,7 +78,8 @@ document.addEventListener('DOMContentLoaded', async () => {
   // Render static Lucide icons in the base HTML
   lucide.createIcons();
 
-  await Promise.all([loadUsers(), loadInbox()]);
+  await Promise.all([loadUsers(), loadInbox(), loadSent()]);
+  renderSidebar();
 });
 
 // ── Panel switching ────────────────────────────────────────────────────────────
@@ -137,12 +139,19 @@ async function loadInbox() {
     const badge  = document.getElementById('unread-badge');
     badge.textContent   = unread || '';
     badge.style.display = unread ? 'inline-flex' : 'none';
-
-    renderSidebar();
   } catch {
     document.getElementById('message-list').innerHTML =
       '<div class="list-placeholder">Failed to load messages.</div>';
   }
+}
+
+async function loadSent() {
+  try {
+    const res = await authFetch(`${API}/messages/sent?limit=100`);
+    if (res.status === 401) { clearSession(); window.location.href = 'index.html'; return; }
+    allSentMessages = res.ok ? await res.json() : [];
+    console.log('[loadSent] raw response:', allSentMessages);
+  } catch { allSentMessages = []; }
 }
 
 // ── Sidebar ────────────────────────────────────────────────────────────────────
@@ -150,17 +159,26 @@ async function loadInbox() {
 function renderSidebar() {
   const list = document.getElementById('message-list');
 
-  if (!allInboxMessages.length) {
+  if (!allInboxMessages.length && !allSentMessages.length) {
     list.innerHTML = '<div class="list-placeholder">No messages yet.</div>';
     return;
   }
 
-  // Group by sender: keep the most-recent message per sender for the preview row
+  // Build a contact map keyed by username; keep the most-recent message per contact
   const map = new Map();
+
   for (const msg of allInboxMessages) {
-    const s = msg.sender_username ?? 'Unknown';
-    if (!map.has(s) || msg.created_at > map.get(s).created_at) {
-      map.set(s, msg);
+    const contact = msg.sender_username ?? 'Unknown';
+    if (!map.has(contact) || msg.created_at > map.get(contact).created_at) {
+      map.set(contact, msg);
+    }
+  }
+
+  for (const msg of allSentMessages) {
+    const contact = msg.recipient_username;
+    if (!contact) continue;
+    if (!map.has(contact) || msg.created_at > map.get(contact).created_at) {
+      map.set(contact, msg);
     }
   }
 
@@ -207,18 +225,38 @@ function openConversation(senderName, el) {
   document.getElementById('chat-header-avatar').textContent = initial;
   document.getElementById('chat-contact-name').textContent  = senderName;
 
-  // All messages from this sender, oldest first
-  const msgs = allInboxMessages
+  // Received from this person
+  const received = allInboxMessages
     .filter(m => m.sender_username === senderName)
+    .map(m => ({ ...m, _dir: 'in' }));
+
+  // Sent to this person — requires recipient_username in the sent API response
+  const sent = allSentMessages
+    .filter(m => m.recipient_username === senderName)
+    .map(m => ({ ...m, _dir: 'out' }));
+
+  // Merge and sort chronologically
+  const merged = [...received, ...sent]
     .sort((a, b) => new Date(a.created_at) - new Date(b.created_at));
 
   const thread = document.getElementById('chat-thread');
-  thread.innerHTML = msgs.map(renderBubble).join('');
+  thread.innerHTML = merged.map(m =>
+    m._dir === 'in' ? renderBubble(m) : renderSentHistoryBubble(m)
+  ).join('');
   lucide.createIcons();
 
-  // Attach inline-decrypt listeners
+  // Decrypt listeners for received bubbles
   thread.querySelectorAll('.b-decrypt-btn').forEach(btn => {
     btn.addEventListener('click', () => handleInlineDecrypt(+btn.dataset.id, btn));
+  });
+
+  // Delete / revoke listeners for sent history bubbles
+  thread.querySelectorAll('.bubble-wrap.out[data-msg-id]').forEach(wrap => {
+    const msgId = +wrap.dataset.msgId;
+    wrap.querySelector('.b-delete-btn')
+      ?.addEventListener('click', () => handleDeleteMessage(msgId, wrap));
+    wrap.querySelector('.b-revoke-btn')
+      ?.addEventListener('click', () => handleRevokeMessage(msgId, wrap));
   });
 
   // Reset reply bar
@@ -261,17 +299,109 @@ function renderBubble(msg) {
   </div>`;
 }
 
-function appendSentBubble(threadId, text) {
-  const thread = document.getElementById(threadId);
-  thread.insertAdjacentHTML('beforeend',
-    `<div class="bubble-wrap out">
-      <div class="bubble">
-        <div class="b-plain">${esc(text)}</div>
+// Sent message loaded from history (ciphertext only — plaintext not available).
+// Exception: if _plaintext was stashed at send time (session-only), show it directly.
+function renderSentHistoryBubble(msg) {
+  if (msg._plaintext != null) return renderSentBubble(msg._plaintext, msg.id);
+  const id = msg.id;
+  return `<div class="bubble-wrap out" data-msg-id="${id}">
+    <div class="bubble">
+      <div class="b-cipher-label">
+        <i data-lucide="lock-keyhole" style="width:12px;height:12px"></i>
+        Sent encrypted
       </div>
-      <div class="b-time">just now</div>
-    </div>`
-  );
+    </div>
+    <div class="b-sent-actions">
+      <button class="b-action-btn b-revoke-btn" title="Revoke recipient access">
+        <i data-lucide="shield-off" style="width:12px;height:12px"></i>
+        Revoke
+      </button>
+      <button class="b-action-btn b-delete-btn" title="Delete message">
+        <i data-lucide="trash-2" style="width:12px;height:12px"></i>
+        Delete
+      </button>
+    </div>
+    <div class="b-time">${fmtDate(msg.created_at)}</div>
+  </div>`;
+}
+
+function renderSentBubble(text, msgId) {
+  const actions = msgId ? `
+    <div class="b-sent-actions">
+      <button class="b-action-btn b-revoke-btn" title="Revoke recipient access">
+        <i data-lucide="shield-off" style="width:12px;height:12px"></i>
+        Revoke
+      </button>
+      <button class="b-action-btn b-delete-btn" title="Delete message">
+        <i data-lucide="trash-2" style="width:12px;height:12px"></i>
+        Delete
+      </button>
+    </div>` : '';
+  return `<div class="bubble-wrap out">
+    <div class="bubble">
+      <div class="b-plain">${esc(text)}</div>
+    </div>
+    ${actions}
+    <div class="b-time">just now</div>
+  </div>`;
+}
+
+function appendSentBubble(threadId, text, msgId) {
+  const thread = document.getElementById(threadId);
+  thread.insertAdjacentHTML('beforeend', renderSentBubble(text, msgId));
+
+  const wrap = thread.lastElementChild;
+  lucide.createIcons();
+
+  if (msgId) {
+    wrap.querySelector('.b-delete-btn')
+      ?.addEventListener('click', () => handleDeleteMessage(msgId, wrap));
+    wrap.querySelector('.b-revoke-btn')
+      ?.addEventListener('click', () => handleRevokeMessage(msgId, wrap));
+  }
+
   thread.scrollTop = thread.scrollHeight;
+}
+
+// ── Delete / Revoke ────────────────────────────────────────────────────────────
+
+async function handleDeleteMessage(msgId, bubbleWrap) {
+  if (!confirm('Delete this message? This cannot be undone.')) return;
+
+  try {
+    const res = await authFetch(`${API}/messages/${msgId}`, { method: 'DELETE' });
+    if (res.status === 401) { clearSession(); window.location.href = 'index.html'; return; }
+    if (!res.ok) {
+      const body = await res.json().catch(() => ({}));
+      throw new Error(body.detail ?? 'Delete failed.');
+    }
+    // Fade out then remove from DOM
+    bubbleWrap.classList.add('deleting');
+    bubbleWrap.addEventListener('animationend', () => bubbleWrap.remove(), { once: true });
+  } catch (err) {
+    alert(`Could not delete: ${err.message}`);
+  }
+}
+
+async function handleRevokeMessage(msgId, bubbleWrap) {
+  try {
+    const res = await authFetch(`${API}/messages/${msgId}/revoke`, { method: 'POST' });
+    if (res.status === 401) { clearSession(); window.location.href = 'index.html'; return; }
+    if (!res.ok) {
+      const body = await res.json().catch(() => ({}));
+      throw new Error(body.detail ?? 'Revoke failed.');
+    }
+    // Replace bubble content with a revoked indicator; remove action buttons
+    bubbleWrap.querySelector('.bubble').innerHTML =
+      `<div class="b-revoked-note">
+        <i data-lucide="shield-off" style="width:13px;height:13px"></i>
+        Access revoked — recipients can no longer decrypt this message.
+      </div>`;
+    bubbleWrap.querySelector('.b-sent-actions')?.remove();
+    lucide.createIcons();
+  } catch (err) {
+    alert(`Could not revoke: ${err.message}`);
+  }
 }
 
 // ── Inline decrypt ─────────────────────────────────────────────────────────────
@@ -383,7 +513,7 @@ async function handleReply() {
 
     textarea.value = '';
     textarea.style.height = 'auto';
-    appendSentBubble('chat-thread', body);
+    appendSentBubble('chat-thread', body, result.id);
 
   } catch (err) {
     showStatus(statusEl, err.message, 'error');
@@ -441,12 +571,22 @@ async function handleSend(e) {
     const result = await sendRes.json();
     if (!sendRes.ok) throw new Error(result.detail ?? 'Send failed.');
 
-    document.getElementById('message-body').value = '';
-    document.getElementById('message-body').style.height = 'auto';
-    // Clear the placeholder and show the sent bubble
-    document.getElementById('compose-thread').innerHTML = '';
-    appendSentBubble('compose-thread', body);
-    showStatus(statusEl, 'Message sent and encrypted.', 'success');
+    // Stash the new message locally so the sidebar and thread reflect it immediately
+    allSentMessages.unshift({
+      id:                 result.id,
+      recipient_username: recipUsername,
+      created_at:         result.created_at ?? new Date().toISOString(),
+      _plaintext:         body,   // session-only; lets the thread show readable text
+    });
+
+    renderSidebar();
+
+    // Navigate to the conversation thread with the recipient
+    const convoEl = [...document.querySelectorAll('.convo-item')]
+      .find(el => el.dataset.sender === recipUsername);
+    if (convoEl) {
+      openConversation(recipUsername, convoEl);
+    }
 
   } catch (err) {
     showStatus(statusEl, err.message, 'error');
@@ -481,8 +621,14 @@ function onRecipientInput() {
 
   box.querySelectorAll('.suggestion-item').forEach(item => {
     item.addEventListener('mousedown', () => {
-      document.getElementById('recipient').value = item.dataset.username;
+      const username = item.dataset.username;
+      document.getElementById('recipient').value = username;
       box.innerHTML = '';
+
+      // If this contact already has a conversation in the sidebar, go there now
+      const convoEl = [...document.querySelectorAll('.convo-item')]
+        .find(el => el.dataset.sender === username);
+      if (convoEl) openConversation(username, convoEl);
     });
   });
 }

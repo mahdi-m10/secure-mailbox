@@ -58,8 +58,8 @@ import hashlib
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
-from sqlalchemy import select
-from sqlalchemy.orm import Session
+from sqlalchemy import func, select
+from sqlalchemy.orm import Session, aliased
 
 from backend import models
 from backend.database import get_db
@@ -356,13 +356,14 @@ def send_message(
     db.refresh(message)
 
     return {
-        "id":              message.id,
-        "sender_id":       message.sender_id,
-        "sender_username": current_user.username,
-        "subject":         message.subject,
-        "is_read":         False,
-        "is_deleted":      message.is_deleted,
-        "created_at":      message.created_at,
+        "id":                 message.id,
+        "sender_id":          message.sender_id,
+        "sender_username":    current_user.username,
+        "recipient_username": body.recipient_username,
+        "subject":            message.subject,
+        "is_read":            False,
+        "is_deleted":         message.is_deleted,
+        "created_at":         message.created_at,
     }
 
 
@@ -445,8 +446,33 @@ def get_sent(
     No ciphertext is included.  Messages are returned newest-first.
     Soft-deleted messages are excluded.
     """
+    # Alias User as the recipient so SQLAlchemy can distinguish it from the
+    # sender join used elsewhere in the query.
+    RecipientUser = aliased(models.User, name="recipient")
+
+    # Subquery: for each message, pick the *first* MessageAccess row by id.
+    # This gives us the original direct recipient and avoids duplicate rows
+    # when a message has been forwarded to additional people.
+    first_access_sq = (
+        select(
+            func.min(models.MessageAccess.id).label("id"),
+            models.MessageAccess.message_id,
+        )
+        .group_by(models.MessageAccess.message_id)
+        .subquery()
+    )
+
     stmt = (
-        select(models.Message)
+        select(models.Message, RecipientUser)
+        .join(first_access_sq, first_access_sq.c.message_id == models.Message.id)
+        .join(
+            models.MessageAccess,
+            models.MessageAccess.id == first_access_sq.c.id,
+        )
+        .join(
+            RecipientUser,
+            RecipientUser.id == models.MessageAccess.recipient_id,
+        )
         .where(
             models.Message.sender_id == current_user.id,
             models.Message.is_deleted.is_(False),
@@ -455,19 +481,20 @@ def get_sent(
         .offset(skip)
         .limit(limit)
     )
-    messages = db.scalars(stmt).all()
+    rows = db.execute(stmt).all()
 
     return [
         {
-            "id":              msg.id,
-            "sender_id":       msg.sender_id,
-            "sender_username": current_user.username,
-            "subject":         msg.subject,
-            "is_read":         True,   # sender always "read" their own outgoing message
-            "is_deleted":      msg.is_deleted,
-            "created_at":      msg.created_at,
+            "id":                 msg.id,
+            "sender_id":          msg.sender_id,
+            "sender_username":    current_user.username,
+            "recipient_username": recipient.username,
+            "subject":            msg.subject,
+            "is_read":            True,   # sender always "read" their own outgoing message
+            "is_deleted":         msg.is_deleted,
+            "created_at":         msg.created_at,
         }
-        for msg in messages
+        for msg, recipient in rows
     ]
 
 

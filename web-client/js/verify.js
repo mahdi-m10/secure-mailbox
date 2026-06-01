@@ -22,6 +22,13 @@ document.addEventListener('DOMContentLoaded', () => {
   if (warning) warning.style.display = loggedIn ? 'none' : 'flex';
 
   document.getElementById('verify-form').addEventListener('submit', handleVerify);
+
+  // Pre-fill message ID from query param (?id=42) and auto-run if present
+  const idParam = new URLSearchParams(window.location.search).get('id');
+  if (idParam) {
+    document.getElementById('verify-msg-id').value = idParam;
+    document.getElementById('verify-form').requestSubmit();
+  }
 });
 
 async function handleVerify(e) {

@@ -1,18 +1,17 @@
 /**
- * chat.js — Inbox, sent box, and compose for chat.html
+ * chat.js — WhatsApp-style chat UI for chat.html
  *
- * Encryption flow (send):
+ * Encryption flow (send / reply):
  *   1. Fetch recipient's SPKI public key from GET /users/{username}
- *   2. encryptMessage(plaintext, recipientPublicKeyB64, senderPrivKey) → {ciphertext, nonce, encryptedKey}
+ *   2. encryptMessage(plaintext, recipientPublicKeyB64, senderPrivKey)
  *      HPKE Mode_Auth: dh1=X25519(ek_priv,recip_pub), dh2=X25519(sender_priv,recip_pub)
- *   3. POST /messages/send with {ciphertext, nonce, encrypted_key: ek_pub_32B, ...}
+ *   3. POST /messages/send with {ciphertext, nonce, encrypted_key, ...}
  *
- * Decryption flow (receive):
- *   1. GET /messages/{id}/download → {ciphertext: storedBlob, nonce, encrypted_key: ek_pub_32B}
- *      storedBlob = base64(nonce_12B ‖ ciphertext_with_tag)
- *   2. GET /users/{sender_username} → senderPublicKeyB64
- *   3. Extract ciphertext_with_tag: base64decode(storedBlob)[12:]
- *   4. decryptMessage(ctB64, nonceB64, encryptedKeyB64, privKey, senderPublicKeyB64) → plaintext
+ * Decryption flow (inline per bubble):
+ *   1. GET /messages/{id}/download → full message blob
+ *   2. GET /users/{sender_username} → sender public key (for Mode_Auth auth)
+ *   3. Extract ct_with_tag: base64decode(storedBlob)[12:]
+ *   4. decryptMessage(ctB64, nonce, encryptedKey, privKey, senderPubKey) → plaintext
  */
 
 import { encryptMessage, decryptMessage, loadPrivateKey, b64ToBuffer, bufToB64 } from './crypto.js';
@@ -30,9 +29,13 @@ function authFetch(url, opts = {}) {
   });
 }
 
-// ---------- Bootstrap ---------------------------------------------------------
+// ── State ──────────────────────────────────────────────────────────────────────
 
-let allUsers = [];
+let allInboxMessages = [];   // full inbox, loaded once
+let currentSender    = null; // sender username of open conversation
+let allUsers         = [];   // user list for autocomplete
+
+// ── Bootstrap ──────────────────────────────────────────────────────────────────
 
 document.addEventListener('DOMContentLoaded', async () => {
   if (!getToken()) { window.location.href = 'index.html'; return; }
@@ -41,51 +44,75 @@ document.addEventListener('DOMContentLoaded', async () => {
   document.getElementById('username-display').textContent = user ?? '';
   document.getElementById('user-avatar').textContent      = (user?.[0] ?? '?').toUpperCase();
 
+  // Wire up static event listeners
   document.getElementById('logout-btn').addEventListener('click', doLogout);
-  document.getElementById('new-msg-btn').addEventListener('click', () => switchTab('compose'));
+  document.getElementById('new-msg-btn').addEventListener('click', showCompose);
+  document.getElementById('new-msg-empty-btn').addEventListener('click', showCompose);
+
   document.getElementById('back-btn').addEventListener('click', () => {
+    currentSender = null;
+    document.querySelectorAll('.convo-item').forEach(el => el.classList.remove('active'));
     showPanel('empty');
-    document.querySelectorAll('.message-item').forEach(el => el.classList.remove('active'));
   });
-  document.getElementById('decrypt-btn').addEventListener('click', handleDecrypt);
+
+  document.getElementById('reply-send-btn').addEventListener('click', handleReply);
   document.getElementById('compose-form').addEventListener('submit', handleSend);
 
-  document.querySelectorAll('.nav-tab').forEach(tab =>
-    tab.addEventListener('click', () => switchTab(tab.dataset.tab))
-  );
-
   const recipInput = document.getElementById('recipient');
-  recipInput.addEventListener('input',  onRecipientInput);
-  recipInput.addEventListener('blur',   () => {
+  recipInput.addEventListener('input', onRecipientInput);
+  recipInput.addEventListener('blur', () => {
     setTimeout(() => { document.getElementById('recipient-suggestions').innerHTML = ''; }, 160);
   });
 
-  await loadUsers();
-  switchTab('inbox');
+  setupAutoResize(document.getElementById('reply-body'));
+  setupAutoResize(document.getElementById('message-body'));
+
+  document.getElementById('reply-body').addEventListener('keydown', e => {
+    if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); handleReply(); }
+  });
+  document.getElementById('message-body').addEventListener('keydown', e => {
+    if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); document.getElementById('send-btn').click(); }
+  });
+
+  // Render static Lucide icons in the base HTML
+  lucide.createIcons();
+
+  await Promise.all([loadUsers(), loadInbox()]);
 });
 
-// ---------- Tab / panel switching --------------------------------------------
-
-function switchTab(tab) {
-  document.querySelectorAll('.nav-tab').forEach(t =>
-    t.classList.toggle('active', t.dataset.tab === tab)
-  );
-  if (tab === 'compose') {
-    showPanel('compose');
-  } else {
-    showPanel('empty');
-    if (tab === 'inbox') loadInbox();
-    else if (tab === 'sent') loadSent();
-  }
-}
+// ── Panel switching ────────────────────────────────────────────────────────────
 
 function showPanel(which) {
-  document.getElementById('compose-panel').classList.toggle('hidden', which !== 'compose');
-  document.getElementById('message-view-panel').classList.toggle('hidden', which !== 'message-view');
-  document.getElementById('empty-panel').classList.toggle('hidden', which !== 'empty');
+  document.getElementById('conversation-panel').classList.toggle('hidden', which !== 'conversation');
+  document.getElementById('compose-panel').classList.toggle('hidden',      which !== 'compose');
+  document.getElementById('empty-panel').classList.toggle('hidden',        which !== 'empty');
 }
 
-// ---------- Load users (for autocomplete) ------------------------------------
+function showCompose() {
+  currentSender = null;
+  document.querySelectorAll('.convo-item').forEach(el => el.classList.remove('active'));
+
+  document.getElementById('recipient').value   = '';
+  document.getElementById('message-body').value = '';
+  document.getElementById('message-body').style.height = 'auto';
+  document.getElementById('compose-thread').innerHTML  = composePlaceholderHTML();
+
+  const statusEl = document.getElementById('compose-status');
+  statusEl.style.display = 'none';
+
+  showPanel('compose');
+  lucide.createIcons();
+  document.getElementById('recipient').focus();
+}
+
+function composePlaceholderHTML() {
+  return `<div class="compose-hint">
+    <i data-lucide="message-square-plus"></i>
+    <p>Select a recipient above to start an encrypted conversation.</p>
+  </div>`;
+}
+
+// ── Load users (autocomplete) ──────────────────────────────────────────────────
 
 async function loadUsers() {
   try {
@@ -94,172 +121,190 @@ async function loadUsers() {
   } catch { allUsers = []; }
 }
 
-// ---------- Inbox / Sent -----------------------------------------------------
+// ── Inbox ──────────────────────────────────────────────────────────────────────
 
 async function loadInbox() {
-  renderListLoading();
+  document.getElementById('message-list').innerHTML =
+    '<div class="list-placeholder"><span class="spinner"></span> Loading…</div>';
+
   try {
     const res = await authFetch(`${API}/messages/inbox?limit=100`);
     if (res.status === 401) { clearSession(); window.location.href = 'index.html'; return; }
     if (!res.ok) throw new Error();
-    const items = await res.json();
+    allInboxMessages = await res.json();
 
-    const unread = items.filter(m => !m.is_read).length;
+    const unread = allInboxMessages.filter(m => !m.is_read).length;
     const badge  = document.getElementById('unread-badge');
-    if (badge) {
-      badge.textContent     = unread || '';
-      badge.style.display   = unread ? 'inline-flex' : 'none';
-    }
+    badge.textContent   = unread || '';
+    badge.style.display = unread ? 'inline-flex' : 'none';
 
-    renderList(items, 'inbox');
+    renderSidebar();
   } catch {
-    renderListError('Failed to load inbox.');
+    document.getElementById('message-list').innerHTML =
+      '<div class="list-placeholder">Failed to load messages.</div>';
   }
 }
 
-async function loadSent() {
-  renderListLoading();
-  try {
-    const res = await authFetch(`${API}/messages/sent?limit=100`);
-    if (res.status === 401) { clearSession(); window.location.href = 'index.html'; return; }
-    if (!res.ok) throw new Error();
-    renderList(await res.json(), 'sent');
-  } catch {
-    renderListError('Failed to load sent messages.');
-  }
-}
+// ── Sidebar ────────────────────────────────────────────────────────────────────
 
-function renderListLoading() {
-  document.getElementById('message-list').innerHTML =
-    '<div class="message-list-loading">Loading…</div>';
-}
-
-function renderListError(msg) {
-  document.getElementById('message-list').innerHTML =
-    `<div class="message-list-empty">${esc(msg)}</div>`;
-}
-
-function renderList(items, mode) {
+function renderSidebar() {
   const list = document.getElementById('message-list');
-  if (!items.length) {
-    list.innerHTML = `<div class="message-list-empty">${
-      mode === 'inbox' ? 'Your inbox is empty.' : 'No sent messages.'
-    }</div>`;
+
+  if (!allInboxMessages.length) {
+    list.innerHTML = '<div class="list-placeholder">No messages yet.</div>';
     return;
   }
 
-  list.innerHTML = items.map(item => {
-    const label   = mode === 'inbox'
-      ? (item.sender_username ?? 'Unknown sender')
-      : 'Sent';  // recipient_username not returned by the sent-list endpoint
-    const subject = item.subject ?? '(no subject)';
-    const unread  = mode === 'inbox' && !item.is_read ? ' unread' : '';
-    return `<div class="message-item${unread}" data-id="${item.id}" data-mode="${mode}">
-      <div class="message-item-header">
-        <span class="message-item-from">${esc(label)}</span>
-        <span class="message-item-date">${fmtDate(item.created_at)}</span>
+  // Group by sender: keep the most-recent message per sender for the preview row
+  const map = new Map();
+  for (const msg of allInboxMessages) {
+    const s = msg.sender_username ?? 'Unknown';
+    if (!map.has(s) || msg.created_at > map.get(s).created_at) {
+      map.set(s, msg);
+    }
+  }
+
+  const convos = [...map.entries()]
+    .sort((a, b) => new Date(b[1].created_at) - new Date(a[1].created_at));
+
+  list.innerHTML = convos.map(([sender, msg]) => {
+    const unreadCount = allInboxMessages.filter(
+      m => m.sender_username === sender && !m.is_read
+    ).length;
+    const initial = (sender?.[0] ?? '?').toUpperCase();
+    return `<div class="convo-item" data-sender="${esc(sender)}">
+      <div class="convo-avatar">${esc(initial)}</div>
+      <div class="convo-body">
+        <div class="convo-row">
+          <span class="convo-name">${esc(sender)}</span>
+          <span class="convo-time">${fmtDate(msg.created_at)}</span>
+        </div>
+        <div class="convo-preview">
+          <i data-lucide="lock" style="width:11px;height:11px;flex-shrink:0"></i>
+          <span>Encrypted message</span>
+          ${unreadCount ? `<span class="convo-unread">${unreadCount}</span>` : ''}
+        </div>
       </div>
-      <div class="message-item-subject">${esc(subject)}</div>
     </div>`;
   }).join('');
 
-  list.querySelectorAll('.message-item').forEach(el => {
-    el.addEventListener('click', () => openMessage(+el.dataset.id, el.dataset.mode, el));
+  list.querySelectorAll('.convo-item').forEach(el => {
+    el.addEventListener('click', () => openConversation(el.dataset.sender, el));
   });
+
+  lucide.createIcons();
 }
 
-// ---------- Message detail ---------------------------------------------------
+// ── Conversation view ──────────────────────────────────────────────────────────
 
-let _currentDownload = null;
+function openConversation(senderName, el) {
+  currentSender = senderName;
 
-async function openMessage(id, mode, el) {
-  document.querySelectorAll('.message-item').forEach(e => e.classList.remove('active'));
+  document.querySelectorAll('.convo-item').forEach(e => e.classList.remove('active'));
   el.classList.add('active');
-  el.classList.remove('unread');
 
-  _currentDownload = null;
+  const initial = (senderName?.[0] ?? '?').toUpperCase();
+  document.getElementById('chat-header-avatar').textContent = initial;
+  document.getElementById('chat-contact-name').textContent  = senderName;
 
-  showPanel('message-view');
+  // All messages from this sender, oldest first
+  const msgs = allInboxMessages
+    .filter(m => m.sender_username === senderName)
+    .sort((a, b) => new Date(a.created_at) - new Date(b.created_at));
 
-  // Reset view
-  const subjectEl = document.getElementById('msg-subject');
-  const fromEl    = document.getElementById('msg-from');
-  const dateEl    = document.getElementById('msg-date');
-  const previewEl = document.getElementById('msg-ciphertext-preview');
-  const plainEl   = document.getElementById('msg-plaintext');
-  const errEl     = document.getElementById('msg-decrypt-error');
-  const decBtn    = document.getElementById('decrypt-btn');
-  const intgEl    = document.getElementById('msg-integrity');
+  const thread = document.getElementById('chat-thread');
+  thread.innerHTML = msgs.map(renderBubble).join('');
+  lucide.createIcons();
 
-  subjectEl.textContent = '…';
-  fromEl.innerHTML = '';
-  dateEl.textContent = '';
-  previewEl.textContent = '';
-  previewEl.classList.remove('hidden');
-  plainEl.textContent = '';
-  plainEl.classList.add('hidden');
-  errEl.classList.remove('alert-error'); errEl.textContent = ''; errEl.style.display = 'none';
-  decBtn.classList.remove('hidden');
-  decBtn.disabled = false;
-  decBtn.innerHTML = '🔓 Decrypt Message';
-  if (intgEl) intgEl.textContent = '';
+  // Attach inline-decrypt listeners
+  thread.querySelectorAll('.b-decrypt-btn').forEach(btn => {
+    btn.addEventListener('click', () => handleInlineDecrypt(+btn.dataset.id, btn));
+  });
+
+  // Reset reply bar
+  const replyBody = document.getElementById('reply-body');
+  replyBody.value = '';
+  replyBody.style.height = 'auto';
+  document.getElementById('reply-status').style.display = 'none';
+
+  showPanel('conversation');
+  thread.scrollTop = thread.scrollHeight;
+  replyBody.focus();
+}
+
+function renderBubble(msg) {
+  const id      = msg.id;
+  const preview = esc((msg.ciphertext ?? '').slice(0, 80)) + '…';
+  return `<div class="bubble-wrap in">
+    <div class="bubble">
+      <div class="b-cipher" id="bc-${id}">
+        <div class="b-cipher-label">
+          <i data-lucide="lock-keyhole" style="width:12px;height:12px"></i>
+          Encrypted message
+        </div>
+        <div class="b-cipher-preview">${preview}</div>
+        <div class="b-cipher-actions">
+          <button class="b-decrypt-btn" data-id="${id}">
+            <i data-lucide="unlock-keyhole" style="width:12px;height:12px"></i>
+            Decrypt
+          </button>
+          <a href="verify.html?id=${id}" class="b-verify-link">
+            <i data-lucide="shield" style="width:11px;height:11px"></i>
+            Verify
+          </a>
+        </div>
+      </div>
+      <div class="b-plain hidden" id="bp-${id}"></div>
+      <div class="b-error hidden" id="be-${id}"></div>
+    </div>
+    <div class="b-time">${fmtDate(msg.created_at)}</div>
+  </div>`;
+}
+
+function appendSentBubble(threadId, text) {
+  const thread = document.getElementById(threadId);
+  thread.insertAdjacentHTML('beforeend',
+    `<div class="bubble-wrap out">
+      <div class="bubble">
+        <div class="b-plain">${esc(text)}</div>
+      </div>
+      <div class="b-time">just now</div>
+    </div>`
+  );
+  thread.scrollTop = thread.scrollHeight;
+}
+
+// ── Inline decrypt ─────────────────────────────────────────────────────────────
+
+async function handleInlineDecrypt(msgId, btn) {
+  btn.disabled = true;
+  btn.innerHTML = '<span class="spinner"></span>';
+
+  const errEl = document.getElementById(`be-${msgId}`);
+  errEl.classList.add('hidden');
 
   try {
-    const res = await authFetch(`${API}/messages/${id}/download`);
+    const res = await authFetch(`${API}/messages/${msgId}/download`);
     if (res.status === 401) { clearSession(); window.location.href = 'index.html'; return; }
     if (!res.ok) {
       const body = await res.json().catch(() => ({}));
       throw new Error(body.detail ?? 'Could not load message.');
     }
     const msg = await res.json();
-    _currentDownload = msg;
 
-    subjectEl.textContent = msg.subject ?? '(no subject)';
-    fromEl.innerHTML      = `<strong>From:</strong> ${esc(msg.sender_username ?? 'Unknown')}`;
-    dateEl.textContent    = new Date(msg.created_at + (msg.created_at.endsWith('Z') ? '' : 'Z')).toLocaleString();
-    previewEl.textContent = msg.ciphertext.slice(0, 140) + '…';
-
-    if (intgEl && msg.integrity_hash) {
-      intgEl.textContent = '🔒 Integrity hash on record';
-    }
-
-    if (mode === 'sent') {
-      decBtn.classList.add('hidden');
-      plainEl.textContent = '(Sent messages are encrypted for the recipient — decryption not available.)';
-      plainEl.classList.remove('hidden');
-      previewEl.classList.add('hidden');
-    }
-
-  } catch (err) {
-    showMsgError(errEl, err.message);
-  }
-}
-
-async function handleDecrypt() {
-  if (!_currentDownload) return;
-  const msg   = _currentDownload;
-  const btn   = document.getElementById('decrypt-btn');
-  const errEl = document.getElementById('msg-decrypt-error');
-
-  btn.disabled = true;
-  btn.innerHTML = '<span class="spinner"></span> Decrypting…';
-  errEl.style.display = 'none';
-
-  try {
     const user    = getUsername();
     const privKey = await loadPrivateKey(user);
     if (!privKey) throw new Error(
-      'No private key found on this device. ' +
-      'Sign out and sign back in to generate a new key pair.'
+      'No private key found on this device. Sign out and sign back in to generate a new key pair.'
     );
     if (!msg.encrypted_key) throw new Error(
       'This message has no encapsulated key — it may not have been encrypted for you.'
     );
     if (!msg.sender_username) throw new Error(
-      'Sender identity unknown — cannot perform Mode_Auth decryption.'
+      'Sender identity unknown — cannot perform authenticated decryption.'
     );
 
-    // Fetch sender's public key for HPKE Mode_Auth authentication (dh2 computation)
+    // Fetch sender public key for HPKE Mode_Auth (dh2 computation)
     const senderRes = await fetch(`${API}/users/${encodeURIComponent(msg.sender_username)}`);
     if (!senderRes.ok) throw new Error(`Could not retrieve sender's public key.`);
     const senderUser = await senderRes.json();
@@ -267,8 +312,7 @@ async function handleDecrypt() {
       `Sender "${msg.sender_username}" has no registered public key.`
     );
 
-    // Download response `ciphertext` = base64(nonce_12B ‖ ct_with_tag)
-    // Extract ct_with_tag by skipping the 12-byte nonce prefix
+    // storedBlob = base64(nonce_12B ‖ ciphertext_with_tag); extract ct_with_tag
     const raw   = new Uint8Array(b64ToBuffer(msg.ciphertext));
     const ctB64 = bufToB64(raw.slice(12));
 
@@ -276,20 +320,142 @@ async function handleDecrypt() {
       ctB64, msg.nonce, msg.encrypted_key, privKey, senderUser.public_key
     );
 
-    document.getElementById('msg-ciphertext-preview').classList.add('hidden');
-    const plainEl = document.getElementById('msg-plaintext');
+    document.getElementById(`bc-${msgId}`).classList.add('hidden');
+    const plainEl = document.getElementById(`bp-${msgId}`);
     plainEl.textContent = plaintext;
     plainEl.classList.remove('hidden');
-    btn.classList.add('hidden');
 
   } catch (err) {
-    showMsgError(errEl, `Decryption failed: ${err.message}`);
+    errEl.textContent = err.message;
+    errEl.classList.remove('hidden');
     btn.disabled = false;
-    btn.innerHTML = '🔓 Decrypt Message';
+    btn.innerHTML = '<i data-lucide="unlock-keyhole" style="width:12px;height:12px"></i> Retry';
+    lucide.createIcons();
   }
 }
 
-// ---------- Compose ----------------------------------------------------------
+// ── Reply (conversation panel) ─────────────────────────────────────────────────
+
+async function handleReply() {
+  if (!currentSender) return;
+
+  const btn      = document.getElementById('reply-send-btn');
+  const textarea = document.getElementById('reply-body');
+  const statusEl = document.getElementById('reply-status');
+  const body     = textarea.value.trim();
+  if (!body) return;
+
+  btn.disabled = true;
+  statusEl.style.display = 'none';
+
+  try {
+    const userRes = await fetch(`${API}/users/${encodeURIComponent(currentSender)}`);
+    if (!userRes.ok) throw new Error(`User "${currentSender}" not found.`);
+    const recipient = await userRes.json();
+    if (!recipient.public_key) throw new Error(
+      `${currentSender} has no registered public key.`
+    );
+
+    const senderPrivKey = await loadPrivateKey(getUsername());
+    if (!senderPrivKey) throw new Error(
+      'No private key found on this device. Please sign out and sign in again.'
+    );
+
+    const { ciphertext, nonce, encryptedKey } = await encryptMessage(
+      body, recipient.public_key, senderPrivKey
+    );
+
+    const sendRes = await authFetch(`${API}/messages/send`, {
+      method:  'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body:    JSON.stringify({
+        recipient_username: currentSender,
+        ciphertext,
+        nonce,
+        encrypted_key:   encryptedKey,
+        subject:         null,
+        associated_data: null,
+      }),
+    });
+
+    const result = await sendRes.json();
+    if (!sendRes.ok) throw new Error(result.detail ?? 'Send failed.');
+
+    textarea.value = '';
+    textarea.style.height = 'auto';
+    appendSentBubble('chat-thread', body);
+
+  } catch (err) {
+    showStatus(statusEl, err.message, 'error');
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+// ── Compose send ───────────────────────────────────────────────────────────────
+
+async function handleSend(e) {
+  e.preventDefault();
+
+  const btn           = document.getElementById('send-btn');
+  const statusEl      = document.getElementById('compose-status');
+  const recipUsername = document.getElementById('recipient').value.trim();
+  const body          = document.getElementById('message-body').value.trim();
+
+  if (!recipUsername) return showStatus(statusEl, 'Please enter a recipient.', 'error');
+  if (!body)          return showStatus(statusEl, 'Message body cannot be empty.', 'error');
+
+  btn.disabled = true;
+  statusEl.style.display = 'none';
+
+  try {
+    const userRes = await fetch(`${API}/users/${encodeURIComponent(recipUsername)}`);
+    if (!userRes.ok) throw new Error(`User "${recipUsername}" not found.`);
+    const recipient = await userRes.json();
+    if (!recipient.public_key) throw new Error(
+      `${recipUsername} has no registered public key and cannot receive encrypted messages.`
+    );
+
+    const senderPrivKey = await loadPrivateKey(getUsername());
+    if (!senderPrivKey) throw new Error(
+      'No private key found on this device. Please sign out and sign in again.'
+    );
+
+    const { ciphertext, nonce, encryptedKey } = await encryptMessage(
+      body, recipient.public_key, senderPrivKey
+    );
+
+    const sendRes = await authFetch(`${API}/messages/send`, {
+      method:  'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body:    JSON.stringify({
+        recipient_username: recipUsername,
+        ciphertext,
+        nonce,
+        encrypted_key:   encryptedKey,
+        subject:         null,
+        associated_data: null,
+      }),
+    });
+
+    const result = await sendRes.json();
+    if (!sendRes.ok) throw new Error(result.detail ?? 'Send failed.');
+
+    document.getElementById('message-body').value = '';
+    document.getElementById('message-body').style.height = 'auto';
+    // Clear the placeholder and show the sent bubble
+    document.getElementById('compose-thread').innerHTML = '';
+    appendSentBubble('compose-thread', body);
+    showStatus(statusEl, 'Message sent and encrypted.', 'success');
+
+  } catch (err) {
+    showStatus(statusEl, err.message, 'error');
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+// ── Recipient autocomplete ─────────────────────────────────────────────────────
 
 function onRecipientInput() {
   const val = this.value.trim().toLowerCase();
@@ -302,14 +468,16 @@ function onRecipientInput() {
     .slice(0, 7);
 
   box.innerHTML = matches.map(u =>
-    `<div class="suggestion-item" data-username="${esc(u.username)}" data-pubkey="${esc(u.public_key ?? '')}">
+    `<div class="suggestion-item" data-username="${esc(u.username)}">
       <div>${esc(u.username)}</div>
       ${u.public_key
-        ? '<div class="suggestion-key">🔑 Public key registered</div>'
-        : '<div class="suggestion-key" style="color:var(--red-500)">⚠ No public key — cannot encrypt</div>'
+        ? '<div class="suggestion-key"><i data-lucide="key-round" style="width:11px;height:11px"></i> Public key registered</div>'
+        : '<div class="suggestion-key" style="color:var(--red-500)"><i data-lucide="triangle-alert" style="width:11px;height:11px"></i> No public key — cannot encrypt</div>'
       }
     </div>`
   ).join('');
+
+  lucide.createIcons();
 
   box.querySelectorAll('.suggestion-item').forEach(item => {
     item.addEventListener('mousedown', () => {
@@ -319,75 +487,15 @@ function onRecipientInput() {
   });
 }
 
-async function handleSend(e) {
-  e.preventDefault();
-  const btn     = document.getElementById('send-btn');
-  const statusEl = document.getElementById('compose-status');
-
-  const recipUsername = document.getElementById('recipient').value.trim();
-  const subject       = document.getElementById('subject').value.trim();
-  const body          = document.getElementById('message-body').value.trim();
-
-  if (!recipUsername) return showStatus(statusEl, 'Please enter a recipient.', 'error');
-  if (!body)          return showStatus(statusEl, 'Message body cannot be empty.', 'error');
-
-  btn.disabled = true;
-  btn.innerHTML = '<span class="spinner"></span> Encrypting…';
-  statusEl.style.display = 'none';
-
-  try {
-    // Fetch recipient's public key
-    const userRes = await fetch(`${API}/users/${encodeURIComponent(recipUsername)}`);
-    if (!userRes.ok) throw new Error(`User "${recipUsername}" not found.`);
-    const recipient = await userRes.json();
-    if (!recipient.public_key) throw new Error(
-      `${recipUsername} has no registered public key and cannot receive encrypted messages.`
-    );
-
-    const senderPrivKey = await loadPrivateKey(getUsername());
-    if (!senderPrivKey) throw new Error('No private key found on this device. Please sign out and sign in again.');
-
-    const { ciphertext, nonce, encryptedKey } = await encryptMessage(body, recipient.public_key, senderPrivKey);
-
-    btn.innerHTML = '<span class="spinner"></span> Sending…';
-
-    const sendRes = await authFetch(`${API}/messages/send`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        recipient_username: recipUsername,
-        ciphertext,
-        nonce,
-        encrypted_key:    encryptedKey,
-        subject:          subject || null,
-        associated_data:  null,
-      }),
-    });
-
-    const result = await sendRes.json();
-    if (!sendRes.ok) throw new Error(result.detail ?? 'Send failed.');
-
-    showStatus(statusEl, '✓ Message sent and encrypted.', 'success');
-    document.getElementById('compose-form').reset();
-    setTimeout(() => switchTab('sent'), 1600);
-
-  } catch (err) {
-    showStatus(statusEl, err.message, 'error');
-  } finally {
-    btn.disabled = false;
-    btn.innerHTML = '🔒 Send Encrypted';
-  }
-}
-
-// ---------- Logout -----------------------------------------------------------
+// ── Logout ─────────────────────────────────────────────────────────────────────
 
 async function doLogout() {
   const refresh = localStorage.getItem('sm_refresh_token');
   if (refresh) {
     await authFetch(`${API}/auth/logout`, {
-      method: 'POST',
+      method:  'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ refresh_token: refresh }),
+      body:    JSON.stringify({ refresh_token: refresh }),
     }).catch(() => {});
   }
   clearSession();
@@ -398,7 +506,14 @@ function clearSession() {
   ['sm_token', 'sm_refresh_token', 'sm_username'].forEach(k => localStorage.removeItem(k));
 }
 
-// ---------- Utilities --------------------------------------------------------
+// ── Utilities ──────────────────────────────────────────────────────────────────
+
+function setupAutoResize(textarea) {
+  textarea.addEventListener('input', () => {
+    textarea.style.height = 'auto';
+    textarea.style.height = Math.min(textarea.scrollHeight, 120) + 'px';
+  });
+}
 
 function esc(s) {
   return String(s ?? '')
@@ -420,11 +535,5 @@ function fmtDate(iso) {
 function showStatus(el, msg, type) {
   el.textContent   = msg;
   el.className     = `alert alert-${type}`;
-  el.style.display = 'block';
-}
-
-function showMsgError(el, msg) {
-  el.textContent  = msg;
-  el.className    = 'alert alert-error';
   el.style.display = 'block';
 }

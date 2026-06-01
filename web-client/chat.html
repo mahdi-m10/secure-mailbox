@@ -10,129 +10,166 @@
 
 <div class="app-layout">
 
-  <!-- ══════════════════════════════════════════
-       SIDEBAR
-  ══════════════════════════════════════════ -->
+  <!-- ═══════════════════════════════════════════
+       SIDEBAR — dark navy
+  ═══════════════════════════════════════════ -->
   <aside class="sidebar">
 
     <div class="sidebar-header">
-      <div class="sidebar-logo">
-        <div class="logo-icon">🔐</div>
-        <h1>SecureMsg</h1>
+      <div class="sidebar-brand">
+        <div class="sidebar-logo-icon">
+          <i data-lucide="lock-keyhole"></i>
+        </div>
+        <span class="sidebar-title">SecureMsg</span>
       </div>
-      <div class="user-chip">
-        <div class="user-avatar" id="user-avatar">?</div>
-        <span class="user-chip-name" id="username-display"></span>
-        <button id="logout-btn" class="btn btn-ghost btn-sm">Sign out</button>
-      </div>
+      <button id="logout-btn" class="icon-btn" title="Sign out">
+        <i data-lucide="log-out"></i>
+      </button>
     </div>
 
-    <nav class="sidebar-nav">
-      <button class="nav-tab active" data-tab="inbox">
-        Inbox <span class="badge" id="unread-badge" style="display:none">0</span>
-      </button>
-      <button class="nav-tab" data-tab="sent">Sent</button>
-      <button class="nav-tab" data-tab="compose">Compose</button>
-    </nav>
+    <div class="sidebar-user">
+      <div class="user-avatar" id="user-avatar">?</div>
+      <span class="user-display-name" id="username-display"></span>
+      <span class="e2e-pill">
+        <i data-lucide="shield-check"></i>
+        E2EE
+      </span>
+    </div>
 
-    <div class="message-list" id="message-list">
-      <div class="message-list-loading">Loading…</div>
+    <div class="sidebar-new">
+      <button id="new-msg-btn" class="btn-new-chat">
+        <i data-lucide="square-pen"></i>
+        New Message
+      </button>
+    </div>
+
+    <div class="sidebar-label">
+      Conversations
+      <span class="badge" id="unread-badge" style="display:none">0</span>
+    </div>
+
+    <div class="conversations-list" id="message-list">
+      <div class="list-placeholder">
+        <span class="spinner"></span>
+        Loading…
+      </div>
     </div>
 
   </aside><!-- /.sidebar -->
 
 
-  <!-- ══════════════════════════════════════════
-       MAIN PANEL
-  ══════════════════════════════════════════ -->
-  <main class="message-panel">
+  <!-- ═══════════════════════════════════════════
+       MAIN CHAT AREA
+  ═══════════════════════════════════════════ -->
+  <main class="chat-area">
 
-    <!-- ── Compose panel ── -->
-    <div id="compose-panel" class="panel hidden">
-      <div class="compose-card">
-        <h2>New Message</h2>
-        <form id="compose-form" novalidate>
+    <!-- ── Conversation view ── -->
+    <div id="conversation-panel" class="chat-view hidden">
 
-          <div class="form-group">
-            <label for="recipient">To</label>
-            <div class="recipient-wrapper">
-              <input id="recipient" type="text"
-                     placeholder="Recipient username"
-                     autocomplete="off" required>
-              <div id="recipient-suggestions" class="suggestions"></div>
-            </div>
+      <header class="chat-header">
+        <button id="back-btn" class="icon-btn" title="Back">
+          <i data-lucide="arrow-left"></i>
+        </button>
+        <div class="chat-header-avatar" id="chat-header-avatar">?</div>
+        <div class="chat-header-meta">
+          <div class="chat-header-name" id="chat-contact-name"></div>
+          <div class="chat-header-sub">
+            <i data-lucide="lock" class="icon-xs"></i>
+            End-to-end encrypted
           </div>
+        </div>
+        <a href="verify.html" class="btn-verify">
+          <i data-lucide="shield"></i>
+          Verify Integrity
+        </a>
+      </header>
 
-          <div class="form-group">
-            <label for="subject">Subject <span style="color:var(--slate-400);font-weight:400">(optional)</span></label>
-            <input id="subject" type="text"
-                   placeholder="Subject line"
-                   maxlength="512">
-          </div>
+      <div class="chat-thread" id="chat-thread"></div>
 
-          <div class="form-group">
-            <label for="message-body">Message</label>
-            <textarea id="message-body"
-                      placeholder="Type your message here…"
-                      rows="9" required></textarea>
-          </div>
-
-          <div class="compose-actions">
-            <button type="submit" id="send-btn" class="btn btn-primary">🔒 Send Encrypted</button>
-            <span class="encrypt-note">🛡 AES-256-GCM end-to-end encryption</span>
-          </div>
-
-          <div id="compose-status" class="alert" style="display:none"></div>
-
-        </form>
+      <div class="chat-input-bar">
+        <textarea id="reply-body"
+                  placeholder="Type a message…"
+                  rows="1"
+                  maxlength="65536"></textarea>
+        <button id="reply-send-btn" class="send-btn" title="Send encrypted">
+          <i data-lucide="send"></i>
+        </button>
       </div>
+      <div id="reply-status" class="alert" style="display:none;margin:0 14px 10px;flex-shrink:0"></div>
+
+    </div><!-- /#conversation-panel -->
+
+
+    <!-- ── Compose / new message ── -->
+    <div id="compose-panel" class="chat-view hidden">
+
+      <header class="chat-header compose-header">
+        <div class="chat-header-meta">
+          <div class="chat-header-name">New Message</div>
+          <div class="chat-header-sub">
+            <i data-lucide="lock" class="icon-xs"></i>
+            AES-256-GCM end-to-end encrypted
+          </div>
+        </div>
+      </header>
+
+      <div class="compose-to-row">
+        <span class="compose-to-label">To</span>
+        <div class="recipient-wrapper">
+          <input id="recipient" type="text"
+                 placeholder="Search for a user…"
+                 autocomplete="off">
+          <div id="recipient-suggestions" class="suggestions"></div>
+        </div>
+      </div>
+
+      <div class="chat-thread compose-thread" id="compose-thread">
+        <div class="compose-hint">
+          <i data-lucide="message-square-plus"></i>
+          <p>Select a recipient above to start an encrypted conversation.</p>
+        </div>
+      </div>
+
+      <form id="compose-form" novalidate>
+        <div class="chat-input-bar">
+          <textarea id="message-body"
+                    placeholder="Type your message…"
+                    rows="1"
+                    maxlength="65536"></textarea>
+          <button type="submit" id="send-btn" class="send-btn" title="Send encrypted">
+            <i data-lucide="send"></i>
+          </button>
+        </div>
+      </form>
+      <div id="compose-status" class="alert" style="display:none;margin:0 14px 10px;flex-shrink:0"></div>
+
     </div><!-- /#compose-panel -->
 
 
-    <!-- ── Message view panel ── -->
-    <div id="message-view-panel" class="panel hidden">
-      <div class="msg-view-card">
-
-        <div class="msg-view-header">
-          <button id="back-btn" class="btn btn-ghost btn-sm">← Back</button>
-          <span class="msg-view-subject" id="msg-subject"></span>
-        </div>
-
-        <div class="msg-meta">
-          <span id="msg-from"></span>
-          <span id="msg-date"></span>
-        </div>
-
-        <div class="msg-body">
-          <div class="msg-ciphertext-preview" id="msg-ciphertext-preview" title="Encrypted ciphertext — click Decrypt to read"></div>
-          <div class="msg-plaintext hidden" id="msg-plaintext"></div>
-          <div id="msg-decrypt-error" class="alert" style="display:none"></div>
-        </div>
-
-        <div class="msg-view-footer">
-          <button id="decrypt-btn" class="btn btn-primary">🔓 Decrypt Message</button>
-          <span class="integrity-note" id="msg-integrity"></span>
-          <a href="verify.html" class="btn btn-ghost btn-sm" style="margin-left:auto">Verify integrity →</a>
-        </div>
-
-      </div>
-    </div><!-- /#message-view-panel -->
-
-
     <!-- ── Empty / welcome state ── -->
-    <div id="empty-panel" class="panel">
+    <div id="empty-panel" class="chat-view">
       <div class="empty-state">
-        <div class="empty-state-icon">✉️</div>
-        <p>Select a message to read, or compose a new one.</p>
-        <small>All messages are end-to-end encrypted with AES-256-GCM.</small>
-        <button id="new-msg-btn" class="btn btn-primary" style="margin-top:8px">Compose Message</button>
+        <div class="empty-icon-wrap">
+          <i data-lucide="message-circle"></i>
+        </div>
+        <h3>Your Messages</h3>
+        <p>Select a conversation or start a new one.</p>
+        <small>
+          <i data-lucide="shield-check" class="icon-xs"></i>
+          All messages are end-to-end encrypted with AES-256-GCM.
+        </small>
+        <button id="new-msg-empty-btn" class="btn btn-primary">
+          <i data-lucide="square-pen"></i>
+          New Message
+        </button>
       </div>
-    </div>
+    </div><!-- /#empty-panel -->
 
-  </main><!-- /.message-panel -->
+  </main><!-- /.chat-area -->
 
 </div><!-- /.app-layout -->
 
+<script src="https://unpkg.com/lucide@latest/dist/umd/lucide.min.js"></script>
 <script type="module" src="js/chat.js"></script>
 </body>
 </html>

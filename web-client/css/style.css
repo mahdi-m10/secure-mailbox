@@ -580,6 +580,48 @@ body {
 .b-verify-link svg { width: 11px; height: 11px; flex-shrink: 0; }
 .b-verify-link:hover { color: var(--blue-600); background: var(--blue-50); }
 
+/* ── Sent bubble action toolbar (hover-revealed) ── */
+.b-sent-actions {
+  display: flex; align-items: center; gap: 2px; justify-content: flex-end;
+  opacity: 0; pointer-events: none;
+  transition: opacity .15s;
+  margin-top: 3px;
+}
+.bubble-wrap.out:hover .b-sent-actions {
+  opacity: 1; pointer-events: auto;
+}
+
+.b-action-btn {
+  display: inline-flex; align-items: center; gap: 4px;
+  padding: 3px 8px; border-radius: 6px; border: none;
+  font-size: 11px; font-weight: 500;
+  cursor: pointer; font-family: inherit;
+  background: transparent; color: var(--slate-500);
+  transition: background .15s, color .15s;
+}
+.b-action-btn svg { width: 12px; height: 12px; flex-shrink: 0; }
+.b-action-btn:hover   { background: rgba(0,0,0,.07); color: var(--slate-700); }
+.b-delete-btn:hover   { background: rgba(239,68,68,.1) !important; color: var(--red-600) !important; }
+.b-revoke-btn:hover   { background: rgba(245,158,11,.1) !important; color: #b45309 !important; }
+
+/* Revoked state inside sent bubble */
+.b-revoked-note {
+  display: flex; align-items: center; gap: 6px;
+  font-size: 12px; font-style: italic;
+  color: rgba(255,255,255,.65);
+}
+.b-revoked-note svg { width: 13px; height: 13px; flex-shrink: 0; }
+
+/* Fade-out animation for deleted bubbles */
+@keyframes bubbleFadeOut {
+  from { opacity: 1; transform: scale(1);   max-height: 200px; }
+  to   { opacity: 0; transform: scale(.95); max-height: 0; margin-bottom: 0; padding: 0; }
+}
+.bubble-wrap.deleting {
+  animation: bubbleFadeOut .3s ease forwards;
+  overflow: hidden; pointer-events: none;
+}
+
 /* Compose hint */
 .compose-hint {
   flex: 1;

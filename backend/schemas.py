@@ -379,6 +379,7 @@ class MessageListItem(BaseModel):
     subject: str | None
     is_read: bool
     is_deleted: bool
+    is_forwarded: bool | None = None        # True for messages created by the forward endpoint
     created_at: datetime
 
 

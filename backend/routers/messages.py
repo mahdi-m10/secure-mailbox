@@ -421,6 +421,7 @@ def get_inbox(
             "subject":         msg.subject,
             "is_read":         access.is_read,
             "is_deleted":      msg.is_deleted,
+            "is_forwarded":    bool(msg.is_forwarded),
             "created_at":      msg.created_at,
         }
         for msg, access, sender in rows
@@ -618,6 +619,7 @@ def forward_message(
             ciphertext=stored_blob,
             subject=message.subject,
             integrity_hash=integrity,
+            is_forwarded=True,
         )
         db.add(fwd_msg)
         db.flush()   # allocate fwd_msg.id

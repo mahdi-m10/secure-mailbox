@@ -47,6 +47,7 @@ document.addEventListener('DOMContentLoaded', async () => {
 
   // Wire up static event listeners
   document.getElementById('logout-btn').addEventListener('click', doLogout);
+  document.getElementById('settings-btn').addEventListener('click', openSettingsModal);
   document.getElementById('new-msg-btn').addEventListener('click', showCompose);
   document.getElementById('new-msg-empty-btn').addEventListener('click', showCompose);
 
@@ -897,6 +898,82 @@ function downloadTxt(filename, content) {
   a.click();
   URL.revokeObjectURL(a.href);
 }
+
+// ── Settings modal (change password) ──────────────────────────────────────────
+
+function openSettingsModal() {
+  const modal = document.getElementById('settings-modal');
+  document.getElementById('change-password-form').reset();
+  document.getElementById('pw-status').style.display = 'none';
+  document.getElementById('pw-submit').disabled = false;
+  document.getElementById('pw-submit').innerHTML =
+    '<i data-lucide="key-round"></i> Change Password';
+  modal.style.display = 'flex';
+  lucide.createIcons();
+  document.getElementById('pw-current').focus();
+
+  // Wire close targets each time the modal opens (avoids duplicate listeners)
+  const close = () => { modal.style.display = 'none'; };
+
+  document.getElementById('settings-modal-close').onclick  = close;
+  document.getElementById('settings-modal-cancel').onclick = close;
+
+  // Click outside the card closes it
+  modal.onclick = e => { if (e.target === modal) close(); };
+
+  document.getElementById('change-password-form').onsubmit = handleChangePassword;
+}
+
+async function handleChangePassword(e) {
+  e.preventDefault();
+
+  const oldPw  = document.getElementById('pw-current').value;
+  const newPw  = document.getElementById('pw-new').value;
+  const confPw = document.getElementById('pw-confirm').value;
+  const status = document.getElementById('pw-status');
+  const btn    = document.getElementById('pw-submit');
+
+  if (newPw !== confPw) {
+    showStatus(status, 'New passwords do not match.', 'error');
+    return;
+  }
+  if (newPw.length < 8) {
+    showStatus(status, 'New password must be at least 8 characters.', 'error');
+    return;
+  }
+
+  btn.disabled = true;
+  btn.innerHTML = '<span class="spinner"></span> Saving…';
+  status.style.display = 'none';
+
+  try {
+    const res = await authFetch(`${API}/auth/password`, {
+      method:  'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body:    JSON.stringify({ old_password: oldPw, new_password: newPw }),
+    });
+
+    const body = await res.json().catch(() => ({}));
+
+    if (!res.ok) {
+      throw new Error(body.detail ?? 'Password change failed.');
+    }
+
+    // All sessions are invalidated server-side after a password change.
+    showStatus(status, 'Password changed. Signing out…', 'success');
+    setTimeout(() => {
+      clearSession();
+      window.location.href = 'index.html';
+    }, 1500);
+
+  } catch (err) {
+    showStatus(status, err.message, 'error');
+    btn.disabled = false;
+    btn.innerHTML = '<i data-lucide="key-round"></i> Change Password';
+    lucide.createIcons();
+  }
+}
+
 
 // ── Logout ─────────────────────────────────────────────────────────────────────
 

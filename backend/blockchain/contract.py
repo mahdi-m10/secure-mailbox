@@ -109,7 +109,7 @@ def record_message_digest(message_hash: str) -> str:
             {
                 "from": account.address,
                 "nonce": nonce,
-                "gas": 120_000,
+                "gas": 300_000,
                 "gasPrice": w3.eth.gas_price,
             }
         )

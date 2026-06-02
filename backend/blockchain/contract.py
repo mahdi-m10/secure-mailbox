@@ -73,11 +73,14 @@ def _connect() -> tuple[Web3, object]:
 
 
 def _normalise_hash(message_hash: str) -> bytes:
-    """Convert a hex keccak256 string to a 32-byte value."""
+    """Convert a 0x-prefixed or bare 64-char hex string to 32 bytes."""
     h = message_hash if message_hash.startswith("0x") else f"0x{message_hash}"
-    if len(h) != 66:
-        raise ValueError(f"Expected a 32-byte keccak256 hash, got {len(h) - 2} hex chars")
-    return bytes.fromhex(h[2:])
+    hex_part = h[2:]
+    if len(hex_part) != 64:
+        raise ValueError(
+            f"Expected 64 hex chars (32 bytes); got {len(hex_part)}: {hex_part!r}"
+        )
+    return bytes.fromhex(hex_part)
 
 
 def record_message_digest(message_hash: str) -> str:
@@ -128,6 +131,47 @@ def record_message_digest(message_hash: str) -> str:
         raise
     except Exception as exc:
         raise RuntimeError(f"Failed to record digest: {exc}") from exc
+
+
+def verify_hash_on_chain(message_hash: str) -> dict:
+    """
+    Check whether a keccak256 hash is recorded on Sepolia and return its details.
+
+    Args:
+        message_hash: Hex string (with or without 0x prefix) of the 32-byte hash.
+
+    Returns:
+        Dict with keys:
+            exists    — True if the hash is found in the contract
+            index     — contract array index (int), or None
+            hash      — 0x-prefixed hex of the stored bytes32, or None
+            timestamp — Unix timestamp (int), or None
+            recorder  — Ethereum address (str), or None
+
+    Raises:
+        EnvironmentError: Missing env vars.
+        RuntimeError: Network or call failure.
+    """
+    hash_bytes = _normalise_hash(message_hash)
+    try:
+        _, contract = _connect()
+        index, exists = contract.functions.getIndexByHash(hash_bytes).call()
+        if not exists:
+            return {"exists": False, "index": None, "hash": None, "timestamp": None, "recorder": None}
+        stored_hash, timestamp, recorder = contract.functions.getDigest(index).call()
+        return {
+            "exists": True,
+            "index": index,
+            "hash": "0x" + stored_hash.hex(),
+            "timestamp": timestamp,
+            "recorder": recorder,
+        }
+    except ContractLogicError as exc:
+        raise ValueError(f"Contract call failed: {exc}") from exc
+    except EnvironmentError:
+        raise
+    except Exception as exc:
+        raise RuntimeError(f"Failed to verify hash on chain: {exc}") from exc
 
 
 def get_transaction_hash(index: int) -> dict:

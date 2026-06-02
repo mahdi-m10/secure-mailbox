@@ -59,8 +59,11 @@ import threading
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
-from sqlalchemy import select
-from sqlalchemy.orm import Session
+from sqlalchemy import func, select
+from sqlalchemy.orm import Session, aliased
+from web3 import Web3
+
+from backend.blockchain.contract import record_message_digest
 
 from backend import models
 from backend.database import get_db
@@ -131,8 +134,49 @@ def _canonical_aad(sender_id: int | None, recipient_id: int, message_id: int) ->
 
 
 # ---------------------------------------------------------------------------
-# Blockchain audit record
+# Blockchain helpers
 # ---------------------------------------------------------------------------
+
+def _submit_to_chain(message_id: int, integrity_hash: str) -> None:
+    """Anchor integrity_hash on Sepolia and store the tx hash in BlockchainRecord.
+
+    Runs in a daemon thread so the HTTP response is not delayed.
+    All failures are logged; the SHA-256 hash is still durable in SQLite
+    even if the Sepolia submission fails.
+    """
+    import logging
+    from backend.database import SessionLocal
+
+    logger = logging.getLogger(__name__)
+
+    if not integrity_hash:
+        logger.warning("msg %d: integrity_hash is empty — skipping chain submission", message_id)
+        return
+
+    if len(integrity_hash) != 64:
+        logger.error(
+            "msg %d: integrity_hash is %d chars (expected 64) — skipping chain submission; value: %r",
+            message_id, len(integrity_hash), integrity_hash,
+        )
+        return
+
+    try:
+        tx_hash = record_message_digest(f"0x{integrity_hash}")
+        with SessionLocal() as db:
+            rec = db.scalars(
+                select(models.BlockchainRecord).where(
+                    models.BlockchainRecord.message_id == message_id
+                )
+            ).first()
+            if rec:
+                rec.eth_tx_hash = tx_hash
+                db.commit()
+                logger.info("msg %d anchored on Sepolia: %s", message_id, tx_hash)
+            else:
+                logger.warning("msg %d: BlockchainRecord not found after commit", message_id)
+    except Exception as exc:
+        logger.error("msg %d: failed to anchor on Sepolia: %r", message_id, exc)
+
 
 def _append_blockchain_record(message: models.Message, db: Session) -> None:
     """Append a new BlockchainRecord chaining *message* to the audit log.
@@ -419,12 +463,14 @@ def send_message(
     stored_blob = _pack(body.nonce, body.ciphertext)
 
     # ------------------------------------------------------------------
-    # 3. Compute an integrity hash over the stored blob.
-    #    The GCM tag inside the ciphertext already guarantees integrity for
-    #    the encrypted payload; this hash additionally covers the nonce and
-    #    detects any storage-layer corruption of the combined blob.
+    # 3. Compute a keccak256 integrity hash over the stored blob.
+    #    keccak256 matches the bytes32 type the smart contract expects, so the
+    #    same value is stored in SQLite and anchored on Sepolia.
     # ------------------------------------------------------------------
-    integrity = hashlib.sha256(stored_blob.encode()).hexdigest()
+    # bytes(HexBytes).hex() is Python's built-in bytes.hex() — always returns exactly
+    # 64 zero-padded lowercase hex chars with no "0x" prefix, regardless of
+    # which web3.py version is installed (HexBytes.hex() behaviour varies).
+    integrity = bytes(Web3.keccak(text=stored_blob)).hex()
 
     # ------------------------------------------------------------------
     # 4. Persist the message row.
@@ -469,13 +515,14 @@ def send_message(
     ).start()
 
     return {
-        "id":              message.id,
-        "sender_id":       message.sender_id,
-        "sender_username": current_user.username,
-        "subject":         message.subject,
-        "is_read":         False,
-        "is_deleted":      message.is_deleted,
-        "created_at":      message.created_at,
+        "id":                 message.id,
+        "sender_id":          message.sender_id,
+        "sender_username":    current_user.username,
+        "recipient_username": body.recipient_username,
+        "subject":            message.subject,
+        "is_read":            False,
+        "is_deleted":         message.is_deleted,
+        "created_at":         message.created_at,
     }
 
 
@@ -516,7 +563,8 @@ def get_inbox(
         )
         .where(
             models.MessageAccess.recipient_id == current_user.id,
-            models.Message.is_deleted.is_(False),
+            # is_deleted is a sender-side flag only; recipients retain inbox
+            # visibility even after the sender deletes their copy.
         )
         .order_by(models.Message.created_at.desc())
         .offset(skip)
@@ -532,6 +580,7 @@ def get_inbox(
             "subject":         msg.subject,
             "is_read":         access.is_read,
             "is_deleted":      msg.is_deleted,
+            "is_forwarded":    bool(msg.is_forwarded),
             "created_at":      msg.created_at,
         }
         for msg, access, sender in rows
@@ -558,8 +607,33 @@ def get_sent(
     No ciphertext is included.  Messages are returned newest-first.
     Soft-deleted messages are excluded.
     """
+    # Alias User as the recipient so SQLAlchemy can distinguish it from the
+    # sender join used elsewhere in the query.
+    RecipientUser = aliased(models.User, name="recipient")
+
+    # Subquery: for each message, pick the *first* MessageAccess row by id.
+    # This gives us the original direct recipient and avoids duplicate rows
+    # when a message has been forwarded to additional people.
+    first_access_sq = (
+        select(
+            func.min(models.MessageAccess.id).label("id"),
+            models.MessageAccess.message_id,
+        )
+        .group_by(models.MessageAccess.message_id)
+        .subquery()
+    )
+
     stmt = (
-        select(models.Message)
+        select(models.Message, RecipientUser)
+        .join(first_access_sq, first_access_sq.c.message_id == models.Message.id)
+        .join(
+            models.MessageAccess,
+            models.MessageAccess.id == first_access_sq.c.id,
+        )
+        .join(
+            RecipientUser,
+            RecipientUser.id == models.MessageAccess.recipient_id,
+        )
         .where(
             models.Message.sender_id == current_user.id,
             models.Message.is_deleted.is_(False),
@@ -568,19 +642,20 @@ def get_sent(
         .offset(skip)
         .limit(limit)
     )
-    messages = db.scalars(stmt).all()
+    rows = db.execute(stmt).all()
 
     return [
         {
-            "id":              msg.id,
-            "sender_id":       msg.sender_id,
-            "sender_username": current_user.username,
-            "subject":         msg.subject,
-            "is_read":         True,   # sender always "read" their own outgoing message
-            "is_deleted":      msg.is_deleted,
-            "created_at":      msg.created_at,
+            "id":                 msg.id,
+            "sender_id":          msg.sender_id,
+            "sender_username":    current_user.username,
+            "recipient_username": recipient.username,
+            "subject":            msg.subject,
+            "is_read":            True,   # sender always "read" their own outgoing message
+            "is_deleted":         msg.is_deleted,
+            "created_at":         msg.created_at,
         }
-        for msg in messages
+        for msg, recipient in rows
     ]
 
 
@@ -655,8 +730,24 @@ def forward_message(
     The server creates a new `message_access` row; the ciphertext is NOT
     copied (the same encrypted blob is shared).
     """
-    message = _load_active_message(message_id, db)
-    _require_read_access(message, current_user, db)   # sender or recipient
+    # Load without the is_deleted gate: a sender's soft-delete only hides the
+    # message from the sender's own view; recipients who still have a
+    # MessageAccess row retain read (and forward) access.
+    message = db.get(models.Message, message_id)
+    if message is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND,
+                            detail="Message not found.")
+
+    if message.sender_id == current_user.id:
+        # Sender: may not forward after they deleted their own copy.
+        if message.is_deleted:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND,
+                                detail="Message not found.")
+    else:
+        # Recipient: access is controlled by MessageAccess row only.
+        if _get_access_record(message.id, current_user.id, db) is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND,
+                                detail="Message not found.")
 
     new_recipient = _lookup_active_user(body.recipient_username, db)
 
@@ -674,12 +765,48 @@ def forward_message(
             detail="That user already has access to this message.",
         )
 
-    db.add(models.MessageAccess(
-        message_id=message.id,
-        recipient_id=new_recipient.id,
-        encrypted_key=body.encrypted_key,
-    ))
-    db.commit()
+    if body.new_ciphertext and body.new_nonce and body.new_encrypted_key:
+        # ── Re-encrypted forward (preferred) ────────────────────────────
+        # The forwarder decrypted the original on their device and re-encrypted
+        # it for the new recipient.  Create a fresh Message row so the new
+        # recipient can actually decrypt the content with their own key pair.
+        stored_blob = _pack(body.new_nonce, body.new_ciphertext)
+        integrity   = bytes(Web3.keccak(text=stored_blob)).hex()  # 64-char hex, no 0x
+
+        fwd_msg = models.Message(
+            sender_id=current_user.id,
+            ciphertext=stored_blob,
+            subject=message.subject,
+            integrity_hash=integrity,
+            is_forwarded=True,
+        )
+        db.add(fwd_msg)
+        db.flush()   # allocate fwd_msg.id
+
+        db.add(models.MessageAccess(
+            message_id=fwd_msg.id,
+            recipient_id=new_recipient.id,
+            encrypted_key=body.new_encrypted_key,
+        ))
+
+        _append_blockchain_record(fwd_msg, db)
+        db.commit()
+
+        threading.Thread(
+            target=_submit_to_chain,
+            args=(fwd_msg.id, fwd_msg.integrity_hash),
+            daemon=True,
+        ).start()
+    else:
+        # ── Legacy path: share existing message_access row ───────────────
+        # The new recipient receives the original ciphertext but cannot
+        # decrypt it (it was encrypted for the original recipient's key).
+        db.add(models.MessageAccess(
+            message_id=message.id,
+            recipient_id=new_recipient.id,
+            encrypted_key=body.encrypted_key,
+        ))
+        db.commit()
 
     return {"detail": f"Message forwarded to {new_recipient.username}."}
 
@@ -722,9 +849,18 @@ def revoke_message(
     _require_sender(message, current_user)
 
     if body.recipient_username is None:
-        # Full revocation: soft-delete the message for everyone.
-        message.is_deleted = True
-        db.add(message)
+        # Full revocation: remove every MessageAccess row so no recipient can
+        # download the message.  The message row, ciphertext, and blockchain
+        # record are intentionally preserved — revocation is an access-control
+        # action, not a deletion.  is_deleted is NOT set so the sender can still
+        # see the message in their sent list (the frontend shows "Access revoked").
+        access_rows = db.scalars(
+            select(models.MessageAccess).where(
+                models.MessageAccess.message_id == message.id
+            )
+        ).all()
+        for row in access_rows:
+            db.delete(row)
         db.commit()
         return {"detail": "Message access revoked for all recipients."}
 
@@ -780,8 +916,27 @@ def download_message(
     Marks the message as read in `message_access` (only for recipients;
     senders are implicitly always "read").
     """
-    message = _load_active_message(message_id, db)
-    access  = _require_read_access(message, current_user, db)
+    # Load the raw message row without the is_deleted gate so that recipients
+    # can still download a message the sender soft-deleted (delete is sender-only).
+    message = db.get(models.Message, message_id)
+    if message is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND,
+                            detail="Message not found.")
+
+    if message.sender_id == current_user.id:
+        # Sender: is_deleted hides the message from their own view.
+        if message.is_deleted:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND,
+                                detail="Message not found.")
+        access = None
+    else:
+        # Recipient: access is controlled solely by the MessageAccess row.
+        # A missing row means either the message never existed for them, or
+        # access was revoked — both surface as 404 to prevent IDOR.
+        access = _get_access_record(message.id, current_user.id, db)
+        if access is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND,
+                                detail="Message not found.")
 
     # ------------------------------------------------------------------
     # Split the stored blob into nonce and ciphertext.
@@ -835,3 +990,80 @@ def download_message(
         "is_read":         access.is_read if access else True,
         "created_at":      message.created_at,
     }
+
+
+# ---------------------------------------------------------------------------
+# GET /messages/{id}/blockchain-proof
+# ---------------------------------------------------------------------------
+
+@router.get(
+    "/{message_id}/blockchain-proof",
+    summary="Retrieve on-chain proof for a message",
+    responses={
+        404: {"description": "Message not found or no access"},
+    },
+)
+def get_blockchain_proof(
+    message_id: int,
+    current_user: models.User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> dict:
+    """Return the blockchain proof for a message.
+
+    Recomputes keccak256 of the stored ciphertext, compares it to the
+    persisted integrity_hash, and (if an Ethereum tx hash exists) fetches
+    the on-chain hash from the Sepolia contract for final verification.
+
+    Response fields:
+      stored_hash   — keccak256 recorded at send time (from SQLite)
+      computed_hash — keccak256 freshly computed from the current ciphertext
+      hash_match    — True when stored == computed (ciphertext not tampered)
+      eth_tx_hash   — Sepolia tx hash, or null if not yet anchored
+      on_chain      — contract record {exists, hash, timestamp, recorder} or null
+      on_chain_match— True when on-chain hash == computed hash, or null
+    """
+    message = db.get(models.Message, message_id)
+    if message is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND,
+                            detail="Message not found.")
+
+    if message.sender_id == current_user.id:
+        if message.is_deleted:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND,
+                                detail="Message not found.")
+    else:
+        if _get_access_record(message.id, current_user.id, db) is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND,
+                                detail="Message not found.")
+
+    rec          = message.blockchain_record
+    stored_hash  = message.integrity_hash or ""
+    # Recompute using the same algorithm as the send/forward endpoints:
+    # bytes(Web3.keccak(text=blob)).hex() — guaranteed 64-char keccak256 hex.
+    computed_hash = bytes(Web3.keccak(text=message.ciphertext)).hex()
+    hash_match   = bool(stored_hash and computed_hash == stored_hash)
+
+    result: dict = {
+        "stored_hash":    stored_hash,
+        "computed_hash":  computed_hash,
+        "hash_match":     hash_match,
+        "has_chain_record": rec is not None,
+        "eth_tx_hash":    rec.eth_tx_hash if rec else None,
+        "block_index":    rec.block_index if rec else None,
+        "chain_recorded_at": rec.created_at.isoformat() if rec else None,
+        "on_chain":       None,
+        "on_chain_match": None,
+    }
+
+    if rec and rec.eth_tx_hash and stored_hash:
+        try:
+            from backend.blockchain.contract import verify_hash_on_chain
+            on_chain = verify_hash_on_chain(stored_hash)
+            result["on_chain"] = on_chain
+            if on_chain["exists"] and on_chain["hash"]:
+                on_chain_hex = on_chain["hash"][2:]  # strip 0x
+                result["on_chain_match"] = (on_chain_hex == computed_hash)
+        except Exception:
+            pass  # node unreachable — surface what we have from SQLite
+
+    return result

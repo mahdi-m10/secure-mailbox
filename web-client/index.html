@@ -12,7 +12,9 @@
 
     <div class="auth-header">
       <div class="auth-logo">
-        <div class="logo-icon">🔐</div>
+        <div class="logo-icon">
+          <i data-lucide="lock-keyhole"></i>
+        </div>
         <h1>SecureMsg</h1>
       </div>
       <p>End-to-end encrypted messaging</p>
@@ -75,13 +77,15 @@
 
     <div class="auth-footer">
       <p class="key-note">
-        🔑 &nbsp;
+        <i data-lucide="key-round"></i>
         <span>Encryption keys are generated locally and never sent to the server.</span>
       </p>
     </div>
 
   </div><!-- /.auth-card -->
 
+  <script src="https://unpkg.com/lucide@latest/dist/umd/lucide.min.js"></script>
+  <script>lucide.createIcons();</script>
   <script type="module" src="js/auth.js"></script>
 </body>
 </html>

@@ -11,11 +11,13 @@
   <!-- ── Navbar ── -->
   <nav class="verify-navbar">
     <a href="chat.html" class="nav-logo">
-      <div class="logo-icon">🔐</div>
+      <div class="logo-icon">
+        <i data-lucide="lock-keyhole"></i>
+      </div>
       SecureMsg
     </a>
     <div class="nav-links">
-      <a href="chat.html">Inbox</a>
+      <a href="chat.html">Messages</a>
       <a href="index.html">Sign out</a>
     </div>
   </nav>
@@ -27,13 +29,14 @@
       <h1>Blockchain Verification</h1>
       <p>
         Verify that a message's encrypted payload has not been altered since it was
-        recorded. The server stores a SHA-256 hash of each message's ciphertext blob
+        recorded. The server stores a keccak256 hash of each message's ciphertext blob
         at send time. This tool recomputes that hash and compares it to the stored record.
       </p>
 
       <!-- Auth warning (shown when not logged in) -->
       <div id="auth-warning" class="auth-warning" style="display:none">
-        ⚠ You are not signed in. You can only verify messages you have access to.
+        <i data-lucide="triangle-alert" style="width:16px;height:16px;flex-shrink:0"></i>
+        You are not signed in. You can only verify messages you have access to.
         <a href="index.html" class="btn btn-primary btn-sm" style="margin-left:auto">Sign In</a>
       </div>
 
@@ -52,6 +55,7 @@
 
           <div class="verify-btn-row">
             <button type="submit" id="verify-btn" class="btn btn-primary">
+              <i data-lucide="shield-check"></i>
               Verify Integrity
             </button>
             <span style="font-size:12px;color:var(--slate-400)">
@@ -77,15 +81,41 @@
           <div class="result-details">
 
             <!-- Hash comparison -->
-            <div class="result-section-label">Integrity Hash Comparison</div>
+            <div class="result-section-label">Integrity Hash Comparison (keccak256)</div>
 
             <div class="hash-row">
-              <label>Stored hash (server record)</label>
+              <label>Stored hash (recorded at send time)</label>
               <div id="hash-stored" class="hash-value"></div>
             </div>
             <div class="hash-row">
-              <label>Computed hash (SHA-256 of retrieved ciphertext)</label>
+              <label>Computed hash (keccak256 of current ciphertext)</label>
               <div id="hash-computed" class="hash-value"></div>
+            </div>
+
+            <!-- Ethereum blockchain anchor -->
+            <div class="result-section-label" style="margin-top:20px">Ethereum Blockchain Proof (Sepolia)</div>
+
+            <div class="hash-row">
+              <label>Anchor status</label>
+              <div id="chain-status" class="hash-value">—</div>
+            </div>
+            <div id="chain-detail-rows" style="display:none">
+              <div class="hash-row">
+                <label>Sepolia transaction</label>
+                <div id="chain-tx-hash" class="hash-value mono" style="word-break:break-all"></div>
+              </div>
+              <div class="hash-row">
+                <label>On-chain keccak256 hash</label>
+                <div id="chain-onchain-hash" class="hash-value"></div>
+              </div>
+              <div class="hash-row">
+                <label>Block timestamp</label>
+                <div id="chain-timestamp"></div>
+              </div>
+              <div class="hash-row">
+                <label>Recorder address</label>
+                <div id="chain-recorder" class="hash-value mono" style="word-break:break-all"></div>
+              </div>
             </div>
 
             <!-- Message metadata -->
@@ -124,6 +154,8 @@
     </div><!-- /.verify-container -->
   </main>
 
+  <script src="https://unpkg.com/lucide@latest/dist/umd/lucide.min.js"></script>
+  <script>lucide.createIcons();</script>
   <script type="module" src="js/verify.js"></script>
 </body>
 </html>

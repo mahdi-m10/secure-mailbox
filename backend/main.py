@@ -5,8 +5,11 @@ Start the server with:
     uvicorn backend.main:app --reload
 """
 
+from pathlib import Path
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 
 from backend.database import engine
 from backend import models
@@ -57,3 +60,12 @@ app.include_router(users_router.router)
 def health_check():
     """Liveness probe — returns 200 when the server is running."""
     return {"status": "ok", "version": app.version}
+
+
+# ---------------------------------------------------------------------------
+# Static files — web client
+# Must be mounted AFTER all API routes so the API routes take precedence.
+# Accessible at /app/index.html, /app/chat.html, etc.
+# ---------------------------------------------------------------------------
+_web_client = Path(__file__).parent.parent / "web-client"
+app.mount("/app", StaticFiles(directory=_web_client, html=True), name="web-client")

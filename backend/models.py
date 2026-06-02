@@ -121,6 +121,12 @@ class Message(Base):
     integrity_hash: Mapped[str | None] = mapped_column(String(256), nullable=True)
 
     is_deleted: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    # Marks messages created by the forward endpoint (re-encrypted for a new recipient).
+    # Existing rows will be NULL (treated as False); new DB gets the column via create_all.
+    # Migration for existing DB: ALTER TABLE messages ADD COLUMN is_forwarded BOOLEAN DEFAULT 0;
+    is_forwarded: Mapped[bool | None] = mapped_column(
+        Boolean, default=False, nullable=True, server_default="0"
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=_utcnow, nullable=False
     )
@@ -209,6 +215,9 @@ class BlockchainRecord(Base):
 
     # Sequence number in the chain (1-based)
     block_index: Mapped[int] = mapped_column(Integer, nullable=False)
+
+    # Sepolia transaction hash (populated by background thread after send)
+    eth_tx_hash: Mapped[str | None] = mapped_column(String(66), nullable=True)
 
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=_utcnow, nullable=False

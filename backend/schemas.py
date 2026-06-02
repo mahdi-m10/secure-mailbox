@@ -323,14 +323,29 @@ class ForwardRequest(BaseModel):
         description="Username of the user to forward the message to.",
     )
 
-    # The forwarder must decrypt the message_key with their own private key,
-    # re-encrypt it with the new recipient's public key, and supply it here.
-    # Without this, the new recipient cannot decrypt the ciphertext.
+    # Re-encryption payload (preferred path).
+    # The forwarder decrypts the original message on their device, then
+    # re-encrypts the plaintext specifically for the new recipient using
+    # encryptMessage(plaintext, recipientPublicKey, forwarderPrivateKey).
+    # When all three fields are present the backend creates a brand-new
+    # Message row so the new recipient can actually decrypt it.
+    new_ciphertext: str | None = Field(
+        default=None,
+        description="Re-encrypted ciphertext (base64, without nonce prepended).",
+    )
+    new_nonce: str | None = Field(
+        default=None,
+        description="Nonce for the re-encrypted ciphertext (base64, 12 bytes).",
+    )
+    new_encrypted_key: str | None = Field(
+        default=None,
+        description="Symmetric key wrapped with the new recipient's public key.",
+    )
+
+    # Legacy field kept for backward compatibility.
     encrypted_key: str | None = Field(
         default=None,
-        description=(
-            "Message symmetric key re-wrapped with the new recipient's public key."
-        ),
+        description="Deprecated: wrapped key for shared-access forwarding.",
     )
 
 
@@ -360,9 +375,11 @@ class MessageListItem(BaseModel):
     id: int
     sender_id: int | None
     sender_username: str | None
+    recipient_username: str | None = None   # populated for sent listings; None for inbox
     subject: str | None
     is_read: bool
     is_deleted: bool
+    is_forwarded: bool | None = None        # True for messages created by the forward endpoint
     created_at: datetime
 
 

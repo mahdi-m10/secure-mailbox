@@ -605,12 +605,41 @@ def forward_message(
             detail="That user already has access to this message.",
         )
 
-    db.add(models.MessageAccess(
-        message_id=message.id,
-        recipient_id=new_recipient.id,
-        encrypted_key=body.encrypted_key,
-    ))
-    db.commit()
+    if body.new_ciphertext and body.new_nonce and body.new_encrypted_key:
+        # ── Re-encrypted forward (preferred) ────────────────────────────
+        # The forwarder decrypted the original on their device and re-encrypted
+        # it for the new recipient.  Create a fresh Message row so the new
+        # recipient can actually decrypt the content with their own key pair.
+        stored_blob = _pack(body.new_nonce, body.new_ciphertext)
+        integrity   = hashlib.sha256(stored_blob.encode()).hexdigest()
+
+        fwd_msg = models.Message(
+            sender_id=current_user.id,
+            ciphertext=stored_blob,
+            subject=message.subject,
+            integrity_hash=integrity,
+        )
+        db.add(fwd_msg)
+        db.flush()   # allocate fwd_msg.id
+
+        db.add(models.MessageAccess(
+            message_id=fwd_msg.id,
+            recipient_id=new_recipient.id,
+            encrypted_key=body.new_encrypted_key,
+        ))
+
+        _append_blockchain_record(fwd_msg, db)
+        db.commit()
+    else:
+        # ── Legacy path: share existing message_access row ───────────────
+        # The new recipient receives the original ciphertext but cannot
+        # decrypt it (it was encrypted for the original recipient's key).
+        db.add(models.MessageAccess(
+            message_id=message.id,
+            recipient_id=new_recipient.id,
+            encrypted_key=body.encrypted_key,
+        ))
+        db.commit()
 
     return {"detail": f"Message forwarded to {new_recipient.username}."}
 

@@ -691,9 +691,10 @@ int main(int argc, char* argv[]) {
               << "Server: " << cfg.base_url << "\n";
 
     if (!crypto_aead_aes256gcm_is_available()) {
-        std::cout << "\nWARNING: AES-NI hardware support not detected.\n"
-                  << "Encryption and decryption will not be available.\n"
-                  << "You can still register, log in, and browse messages.\n\n";
+        std::cout << "\nNOTE: AES-NI not available on this CPU.\n"
+                  << "libsodium's AES-256-GCM requires hardware acceleration;\n"
+                  << "Send and Decrypt operations will be disabled.\n"
+                  << "Register, Login, Inbox, and Sent browsing work normally.\n\n";
     }
 
     Session sess{Client{cfg}};

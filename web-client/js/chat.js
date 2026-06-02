@@ -286,11 +286,14 @@ function openConversation(senderName, el) {
 }
 
 function renderBubble(msg) {
-  const id      = msg.id;
-  const preview = esc((msg.ciphertext ?? '').slice(0, 80)) + '…';
+  const id       = msg.id;
+  const preview  = esc((msg.ciphertext ?? '').slice(0, 80)) + '…';
+  const fwdLabel = msg.is_forwarded
+    ? `<div class="b-forwarded-label">&#x21AA; Forwarded</div>`
+    : '';
   return `<div class="bubble-wrap in" data-msg-id="${id}">
     <div class="bubble">
-      <div class="b-cipher" id="bc-${id}">
+      ${fwdLabel}<div class="b-cipher" id="bc-${id}">
         <div class="b-cipher-label">
           <i data-lucide="lock-keyhole" style="width:12px;height:12px"></i>
           Encrypted message

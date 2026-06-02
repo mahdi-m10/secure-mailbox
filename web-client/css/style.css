@@ -519,6 +519,15 @@ body {
   text-align: right;
 }
 
+/* Forwarded indicator */
+.b-forwarded-label {
+  font-size: 10px;
+  color: var(--slate-400);
+  margin-bottom: 5px;
+  display: flex; align-items: center; gap: 3px;
+  font-style: italic;
+}
+
 /* Cipher label inside bubble */
 .b-cipher-label {
   display: flex; align-items: center; gap: 5px;

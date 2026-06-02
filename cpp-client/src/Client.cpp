@@ -133,13 +133,11 @@ std::string Client::url_encode(const std::string& value) const {
 // ── Auth ──────────────────────────────────────────────────────────────────────
 
 bool Client::login(const std::string& username, const std::string& password) {
-    // FastAPI's OAuth2PasswordRequestForm requires application/x-www-form-urlencoded.
-    // We percent-encode the credentials in case they contain special characters.
-    const std::string form_body =
-        "username=" + url_encode(username) +
-        "&password=" + url_encode(password);
+    json body;
+    body["username"] = username;
+    body["password"] = password;
 
-    auto resp = request("POST", "/auth/login", form_body, /*form_encoded=*/true);
+    auto resp = request("POST", "/auth/login", body.dump());
 
     if (resp.status_code != 200) {
         print_error(resp.status_code, resp.body);

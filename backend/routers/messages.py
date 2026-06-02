@@ -137,16 +137,24 @@ def _canonical_aad(sender_id: int | None, recipient_id: int, message_id: int) ->
 # Blockchain helpers
 # ---------------------------------------------------------------------------
 
-def _submit_to_chain(message_id: int, keccak_hash: str) -> None:
-    """Record keccak_hash on Sepolia and persist the returned tx hash.
+def _submit_to_chain(message_id: int, integrity_hash: str) -> None:
+    """Anchor integrity_hash on Sepolia and store the tx hash in BlockchainRecord.
 
     Runs in a daemon thread so the HTTP response is not delayed.
-    Failures are silently swallowed — the keccak256 hash is still in SQLite
-    and the send endpoint has already returned successfully.
+    All failures are logged; the SHA-256 hash is still durable in SQLite
+    even if the Sepolia submission fails.
     """
+    import logging
     from backend.database import SessionLocal
+
+    logger = logging.getLogger(__name__)
+
+    if not integrity_hash:
+        logger.warning("msg %d: integrity_hash is empty — skipping chain submission", message_id)
+        return
+
     try:
-        tx_hash = record_message_digest(f"0x{keccak_hash}")
+        tx_hash = record_message_digest(f"0x{integrity_hash}")
         with SessionLocal() as db:
             rec = db.scalars(
                 select(models.BlockchainRecord).where(
@@ -156,8 +164,11 @@ def _submit_to_chain(message_id: int, keccak_hash: str) -> None:
             if rec:
                 rec.eth_tx_hash = tx_hash
                 db.commit()
-    except Exception:
-        pass  # best-effort; keccak hash is already durable in SQLite
+                logger.info("msg %d anchored on Sepolia: %s", message_id, tx_hash)
+            else:
+                logger.warning("msg %d: BlockchainRecord not found after commit", message_id)
+    except Exception as exc:
+        logger.error("msg %d: failed to anchor on Sepolia: %r", message_id, exc)
 
 
 def _append_blockchain_record(message: models.Message, db: Session) -> None:
@@ -388,7 +399,7 @@ def send_message(
     # ------------------------------------------------------------------
     threading.Thread(
         target=_submit_to_chain,
-        args=(message.id, message.integrity_hash),
+        args=(message.id, message.integrity_hash or ""),
         daemon=True,
     ).start()
 
@@ -916,7 +927,10 @@ def get_blockchain_proof(
 
     rec          = message.blockchain_record
     stored_hash  = message.integrity_hash or ""
-    computed_hash = Web3.keccak(text=message.ciphertext).hex()[2:]  # 64-char hex
+    # integrity_hash was stored as SHA-256(stored_blob); recompute the same way.
+    # (The field is named "keccak" in some comments but the send endpoint uses
+    # hashlib.sha256 — we match that here so hash_match is actually meaningful.)
+    computed_hash = hashlib.sha256(message.ciphertext.encode()).hexdigest()
     hash_match   = bool(stored_hash and computed_hash == stored_hash)
 
     result: dict = {

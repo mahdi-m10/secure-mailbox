@@ -130,6 +130,47 @@ def record_message_digest(message_hash: str) -> str:
         raise RuntimeError(f"Failed to record digest: {exc}") from exc
 
 
+def verify_hash_on_chain(message_hash: str) -> dict:
+    """
+    Check whether a keccak256 hash is recorded on Sepolia and return its details.
+
+    Args:
+        message_hash: Hex string (with or without 0x prefix) of the 32-byte hash.
+
+    Returns:
+        Dict with keys:
+            exists    — True if the hash is found in the contract
+            index     — contract array index (int), or None
+            hash      — 0x-prefixed hex of the stored bytes32, or None
+            timestamp — Unix timestamp (int), or None
+            recorder  — Ethereum address (str), or None
+
+    Raises:
+        EnvironmentError: Missing env vars.
+        RuntimeError: Network or call failure.
+    """
+    hash_bytes = _normalise_hash(message_hash)
+    try:
+        _, contract = _connect()
+        index, exists = contract.functions.getIndexByHash(hash_bytes).call()
+        if not exists:
+            return {"exists": False, "index": None, "hash": None, "timestamp": None, "recorder": None}
+        stored_hash, timestamp, recorder = contract.functions.getDigest(index).call()
+        return {
+            "exists": True,
+            "index": index,
+            "hash": "0x" + stored_hash.hex(),
+            "timestamp": timestamp,
+            "recorder": recorder,
+        }
+    except ContractLogicError as exc:
+        raise ValueError(f"Contract call failed: {exc}") from exc
+    except EnvironmentError:
+        raise
+    except Exception as exc:
+        raise RuntimeError(f"Failed to verify hash on chain: {exc}") from exc
+
+
 def get_transaction_hash(index: int) -> dict:
     """
     Retrieve a stored digest entry by its zero-based index.

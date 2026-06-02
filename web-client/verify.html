@@ -81,15 +81,41 @@
           <div class="result-details">
 
             <!-- Hash comparison -->
-            <div class="result-section-label">Integrity Hash Comparison</div>
+            <div class="result-section-label">Integrity Hash Comparison (keccak256)</div>
 
             <div class="hash-row">
-              <label>Stored hash (server record)</label>
+              <label>Stored hash (recorded at send time)</label>
               <div id="hash-stored" class="hash-value"></div>
             </div>
             <div class="hash-row">
-              <label>Computed hash (SHA-256 of retrieved ciphertext)</label>
+              <label>Computed hash (keccak256 of current ciphertext)</label>
               <div id="hash-computed" class="hash-value"></div>
+            </div>
+
+            <!-- Ethereum blockchain anchor -->
+            <div class="result-section-label" style="margin-top:20px">Ethereum Blockchain Proof (Sepolia)</div>
+
+            <div class="hash-row">
+              <label>Anchor status</label>
+              <div id="chain-status" class="hash-value">—</div>
+            </div>
+            <div id="chain-detail-rows" style="display:none">
+              <div class="hash-row">
+                <label>Sepolia transaction</label>
+                <div id="chain-tx-hash" class="hash-value mono" style="word-break:break-all"></div>
+              </div>
+              <div class="hash-row">
+                <label>On-chain keccak256 hash</label>
+                <div id="chain-onchain-hash" class="hash-value"></div>
+              </div>
+              <div class="hash-row">
+                <label>Block timestamp</label>
+                <div id="chain-timestamp"></div>
+              </div>
+              <div class="hash-row">
+                <label>Recorder address</label>
+                <div id="chain-recorder" class="hash-value mono" style="word-break:break-all"></div>
+              </div>
             </div>
 
             <!-- Message metadata -->

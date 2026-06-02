@@ -216,6 +216,9 @@ class BlockchainRecord(Base):
     # Sequence number in the chain (1-based)
     block_index: Mapped[int] = mapped_column(Integer, nullable=False)
 
+    # Sepolia transaction hash (populated by background thread after send)
+    eth_tx_hash: Mapped[str | None] = mapped_column(String(66), nullable=True)
+
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=_utcnow, nullable=False
     )

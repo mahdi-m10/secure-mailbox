@@ -55,11 +55,15 @@ never removes the BlockchainRecord (enforced by the RESTRICT FK constraint).
 
 import base64
 import hashlib
+import threading
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session, aliased
+from web3 import Web3
+
+from backend.blockchain.contract import record_message_digest
 
 from backend import models
 from backend.database import get_db
@@ -130,8 +134,31 @@ def _canonical_aad(sender_id: int | None, recipient_id: int, message_id: int) ->
 
 
 # ---------------------------------------------------------------------------
-# Blockchain audit record
+# Blockchain helpers
 # ---------------------------------------------------------------------------
+
+def _submit_to_chain(message_id: int, keccak_hash: str) -> None:
+    """Record keccak_hash on Sepolia and persist the returned tx hash.
+
+    Runs in a daemon thread so the HTTP response is not delayed.
+    Failures are silently swallowed — the keccak256 hash is still in SQLite
+    and the send endpoint has already returned successfully.
+    """
+    from backend.database import SessionLocal
+    try:
+        tx_hash = record_message_digest(f"0x{keccak_hash}")
+        with SessionLocal() as db:
+            rec = db.scalars(
+                select(models.BlockchainRecord).where(
+                    models.BlockchainRecord.message_id == message_id
+                )
+            ).first()
+            if rec:
+                rec.eth_tx_hash = tx_hash
+                db.commit()
+    except Exception:
+        pass  # best-effort; keccak hash is already durable in SQLite
+
 
 def _append_blockchain_record(message: models.Message, db: Session) -> None:
     """Append a new BlockchainRecord chaining *message* to the audit log.
@@ -314,12 +341,11 @@ def send_message(
     stored_blob = _pack(body.nonce, body.ciphertext)
 
     # ------------------------------------------------------------------
-    # 3. Compute an integrity hash over the stored blob.
-    #    The GCM tag inside the ciphertext already guarantees integrity for
-    #    the encrypted payload; this hash additionally covers the nonce and
-    #    detects any storage-layer corruption of the combined blob.
+    # 3. Compute a keccak256 integrity hash over the stored blob.
+    #    keccak256 matches the bytes32 type the smart contract expects, so the
+    #    same value is stored in SQLite and anchored on Sepolia.
     # ------------------------------------------------------------------
-    integrity = hashlib.sha256(stored_blob.encode()).hexdigest()
+    integrity = Web3.keccak(text=stored_blob).hex()[2:]  # 64-char hex, no 0x
 
     # ------------------------------------------------------------------
     # 4. Persist the message row.
@@ -354,6 +380,17 @@ def send_message(
 
     db.commit()
     db.refresh(message)
+
+    # ------------------------------------------------------------------
+    # 7. Anchor the keccak256 hash on Sepolia in a background thread so
+    #    the HTTP response is not held waiting for the ~30s block time.
+    #    The thread updates blockchain_records.eth_tx_hash when done.
+    # ------------------------------------------------------------------
+    threading.Thread(
+        target=_submit_to_chain,
+        args=(message.id, message.integrity_hash),
+        daemon=True,
+    ).start()
 
     return {
         "id":                 message.id,
@@ -612,7 +649,7 @@ def forward_message(
         # it for the new recipient.  Create a fresh Message row so the new
         # recipient can actually decrypt the content with their own key pair.
         stored_blob = _pack(body.new_nonce, body.new_ciphertext)
-        integrity   = hashlib.sha256(stored_blob.encode()).hexdigest()
+        integrity   = Web3.keccak(text=stored_blob).hex()[2:]  # 64-char hex, no 0x
 
         fwd_msg = models.Message(
             sender_id=current_user.id,
@@ -632,6 +669,12 @@ def forward_message(
 
         _append_blockchain_record(fwd_msg, db)
         db.commit()
+
+        threading.Thread(
+            target=_submit_to_chain,
+            args=(fwd_msg.id, fwd_msg.integrity_hash),
+            daemon=True,
+        ).start()
     else:
         # ── Legacy path: share existing message_access row ───────────────
         # The new recipient receives the original ciphertext but cannot
@@ -825,3 +868,78 @@ def download_message(
         "is_read":         access.is_read if access else True,
         "created_at":      message.created_at,
     }
+
+
+# ---------------------------------------------------------------------------
+# GET /messages/{id}/blockchain-proof
+# ---------------------------------------------------------------------------
+
+@router.get(
+    "/{message_id}/blockchain-proof",
+    summary="Retrieve on-chain proof for a message",
+    responses={
+        404: {"description": "Message not found or no access"},
+    },
+)
+def get_blockchain_proof(
+    message_id: int,
+    current_user: models.User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> dict:
+    """Return the blockchain proof for a message.
+
+    Recomputes keccak256 of the stored ciphertext, compares it to the
+    persisted integrity_hash, and (if an Ethereum tx hash exists) fetches
+    the on-chain hash from the Sepolia contract for final verification.
+
+    Response fields:
+      stored_hash   — keccak256 recorded at send time (from SQLite)
+      computed_hash — keccak256 freshly computed from the current ciphertext
+      hash_match    — True when stored == computed (ciphertext not tampered)
+      eth_tx_hash   — Sepolia tx hash, or null if not yet anchored
+      on_chain      — contract record {exists, hash, timestamp, recorder} or null
+      on_chain_match— True when on-chain hash == computed hash, or null
+    """
+    message = db.get(models.Message, message_id)
+    if message is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND,
+                            detail="Message not found.")
+
+    if message.sender_id == current_user.id:
+        if message.is_deleted:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND,
+                                detail="Message not found.")
+    else:
+        if _get_access_record(message.id, current_user.id, db) is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND,
+                                detail="Message not found.")
+
+    rec          = message.blockchain_record
+    stored_hash  = message.integrity_hash or ""
+    computed_hash = Web3.keccak(text=message.ciphertext).hex()[2:]  # 64-char hex
+    hash_match   = bool(stored_hash and computed_hash == stored_hash)
+
+    result: dict = {
+        "stored_hash":    stored_hash,
+        "computed_hash":  computed_hash,
+        "hash_match":     hash_match,
+        "has_chain_record": rec is not None,
+        "eth_tx_hash":    rec.eth_tx_hash if rec else None,
+        "block_index":    rec.block_index if rec else None,
+        "chain_recorded_at": rec.created_at.isoformat() if rec else None,
+        "on_chain":       None,
+        "on_chain_match": None,
+    }
+
+    if rec and rec.eth_tx_hash and stored_hash:
+        try:
+            from backend.blockchain.contract import verify_hash_on_chain
+            on_chain = verify_hash_on_chain(stored_hash)
+            result["on_chain"] = on_chain
+            if on_chain["exists"] and on_chain["hash"]:
+                on_chain_hex = on_chain["hash"][2:]  # strip 0x
+                result["on_chain_match"] = (on_chain_hex == computed_hash)
+        except Exception:
+            pass  # node unreachable — surface what we have from SQLite
+
+    return result

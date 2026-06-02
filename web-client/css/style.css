@@ -580,6 +580,55 @@ body {
 .b-verify-link svg { width: 11px; height: 11px; flex-shrink: 0; }
 .b-verify-link:hover { color: var(--blue-600); background: var(--blue-50); }
 
+/* ── Received bubble action toolbar (hover-revealed, left-aligned) ── */
+.b-in-actions {
+  display: flex; align-items: center; gap: 2px; justify-content: flex-start;
+  opacity: 0; pointer-events: none;
+  transition: opacity .15s;
+  margin-top: 3px;
+}
+.bubble-wrap.in:hover .b-in-actions,
+.bubble-wrap.in.b-forwarding .b-in-actions {
+  opacity: 1; pointer-events: auto;
+}
+
+/* ── Forward inline UI ── */
+.b-forward-ui { padding: 6px 0 0; }
+
+.b-forward-row {
+  display: flex; align-items: center; gap: 5px;
+}
+
+.b-forward-recipient-wrap { position: relative; flex: 1; min-width: 0; }
+
+.b-forward-input {
+  width: 100%;
+  padding: 5px 8px;
+  border: 1px solid var(--slate-300); border-radius: 6px;
+  font-size: 12px; font-family: inherit; color: var(--slate-900);
+  outline: none; background: #fff;
+  transition: border-color .15s;
+}
+.b-forward-input:focus { border-color: var(--blue-600); }
+
+.b-forward-drop {
+  position: absolute; top: 100%; left: 0; right: 0; z-index: 200;
+  background: #fff;
+  border: 1px solid var(--slate-200); border-radius: var(--radius);
+  box-shadow: var(--shadow-lg);
+  max-height: 150px; overflow-y: auto;
+  margin-top: 2px;
+}
+.b-forward-item {
+  padding: 6px 10px; cursor: pointer; font-size: 12px;
+  transition: background .1s;
+}
+.b-forward-item:hover { background: var(--slate-50); }
+
+.b-forward-status {
+  font-size: 11px; margin-top: 4px; min-height: 14px;
+}
+
 /* ── Sent bubble action toolbar (hover-revealed) ── */
 .b-sent-actions {
   display: flex; align-items: center; gap: 2px; justify-content: flex-end;

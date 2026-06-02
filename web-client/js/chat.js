@@ -759,10 +759,49 @@ function showForwardUI(msgId, bubbleWrap) {
     status.textContent = '';
 
     try {
+      // ── Step 1: obtain plaintext ──────────────────────────────────────
+      const plainEl  = document.getElementById(`bp-${msgId}`);
+      const errEl    = document.getElementById(`be-${msgId}`);
+      let   plaintext = '';
+
+      if (plainEl && !plainEl.classList.contains('hidden') && plainEl.textContent.trim()) {
+        plaintext = plainEl.textContent.trim();
+      } else {
+        // Decrypt the bubble first, then read the result from the DOM
+        const decryptBtn = bubbleWrap.querySelector('.b-decrypt-btn');
+        if (!decryptBtn) throw new Error('Message must be decrypted before forwarding.');
+        await handleInlineDecrypt(msgId, decryptBtn);
+        plaintext = plainEl?.textContent.trim() ?? '';
+        if (!plaintext || (errEl && !errEl.classList.contains('hidden'))) {
+          throw new Error('Could not decrypt message. Cannot forward.');
+        }
+      }
+
+      // ── Step 2: fetch new recipient's public key ──────────────────────
+      const userRes = await fetch(`${API}/users/${encodeURIComponent(recipient)}`);
+      if (!userRes.ok) throw new Error(`User "${recipient}" not found.`);
+      const recipientUser = await userRes.json();
+      if (!recipientUser.public_key)
+        throw new Error(`${recipient} has no registered public key.`);
+
+      // ── Step 3: re-encrypt for the new recipient ──────────────────────
+      const privKey = await loadPrivateKey(getUsername());
+      if (!privKey) throw new Error('No private key found. Please sign out and back in.');
+
+      const { ciphertext, nonce, encryptedKey } = await encryptMessage(
+        plaintext, recipientUser.public_key, privKey
+      );
+
+      // ── Step 4: send re-encrypted payload to backend ──────────────────
       const res = await authFetch(`${API}/messages/${msgId}/forward`, {
         method:  'POST',
         headers: { 'Content-Type': 'application/json' },
-        body:    JSON.stringify({ recipient_username: recipient }),
+        body:    JSON.stringify({
+          recipient_username: recipient,
+          new_ciphertext:     ciphertext,
+          new_nonce:          nonce,
+          new_encrypted_key:  encryptedKey,
+        }),
       });
       if (res.status === 401) { clearSession(); window.location.href = 'index.html'; return; }
       if (!res.ok) {

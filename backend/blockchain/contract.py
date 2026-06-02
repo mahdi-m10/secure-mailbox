@@ -73,11 +73,14 @@ def _connect() -> tuple[Web3, object]:
 
 
 def _normalise_hash(message_hash: str) -> bytes:
-    """Convert a hex keccak256 string to a 32-byte value."""
+    """Convert a 0x-prefixed or bare 64-char hex string to 32 bytes."""
     h = message_hash if message_hash.startswith("0x") else f"0x{message_hash}"
-    if len(h) != 66:
-        raise ValueError(f"Expected a 32-byte keccak256 hash, got {len(h) - 2} hex chars")
-    return bytes.fromhex(h[2:])
+    hex_part = h[2:]
+    if len(hex_part) != 64:
+        raise ValueError(
+            f"Expected 64 hex chars (32 bytes); got {len(hex_part)}: {hex_part!r}"
+        )
+    return bytes.fromhex(hex_part)
 
 
 def record_message_digest(message_hash: str) -> str:

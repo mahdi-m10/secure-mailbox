@@ -153,6 +153,13 @@ def _submit_to_chain(message_id: int, integrity_hash: str) -> None:
         logger.warning("msg %d: integrity_hash is empty — skipping chain submission", message_id)
         return
 
+    if len(integrity_hash) != 64:
+        logger.error(
+            "msg %d: integrity_hash is %d chars (expected 64) — skipping chain submission; value: %r",
+            message_id, len(integrity_hash), integrity_hash,
+        )
+        return
+
     try:
         tx_hash = record_message_digest(f"0x{integrity_hash}")
         with SessionLocal() as db:
@@ -356,7 +363,10 @@ def send_message(
     #    keccak256 matches the bytes32 type the smart contract expects, so the
     #    same value is stored in SQLite and anchored on Sepolia.
     # ------------------------------------------------------------------
-    integrity = Web3.keccak(text=stored_blob).hex()[2:]  # 64-char hex, no 0x
+    # bytes(HexBytes).hex() is Python's built-in bytes.hex() — always returns exactly
+    # 64 zero-padded lowercase hex chars with no "0x" prefix, regardless of
+    # which web3.py version is installed (HexBytes.hex() behaviour varies).
+    integrity = bytes(Web3.keccak(text=stored_blob)).hex()
 
     # ------------------------------------------------------------------
     # 4. Persist the message row.
@@ -660,7 +670,7 @@ def forward_message(
         # it for the new recipient.  Create a fresh Message row so the new
         # recipient can actually decrypt the content with their own key pair.
         stored_blob = _pack(body.new_nonce, body.new_ciphertext)
-        integrity   = Web3.keccak(text=stored_blob).hex()[2:]  # 64-char hex, no 0x
+        integrity   = bytes(Web3.keccak(text=stored_blob)).hex()  # 64-char hex, no 0x
 
         fwd_msg = models.Message(
             sender_id=current_user.id,
@@ -927,10 +937,9 @@ def get_blockchain_proof(
 
     rec          = message.blockchain_record
     stored_hash  = message.integrity_hash or ""
-    # integrity_hash was stored as SHA-256(stored_blob); recompute the same way.
-    # (The field is named "keccak" in some comments but the send endpoint uses
-    # hashlib.sha256 — we match that here so hash_match is actually meaningful.)
-    computed_hash = hashlib.sha256(message.ciphertext.encode()).hexdigest()
+    # Recompute using the same algorithm as the send/forward endpoints:
+    # bytes(Web3.keccak(text=blob)).hex() — guaranteed 64-char keccak256 hex.
+    computed_hash = bytes(Web3.keccak(text=message.ciphertext)).hex()
     hash_match   = bool(stored_hash and computed_hash == stored_hash)
 
     result: dict = {

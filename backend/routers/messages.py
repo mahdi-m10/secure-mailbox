@@ -55,6 +55,7 @@ never removes the BlockchainRecord (enforced by the RESTRICT FK constraint).
 
 import base64
 import hashlib
+import threading
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
@@ -170,6 +171,110 @@ def _append_blockchain_record(message: models.Message, db: Session) -> None:
         block_hash=block_hash,
         block_index=block_index,
     ))
+
+
+def _submit_to_chain(message_id: int, integrity_hash: str) -> None:
+    """Anchor integrity_hash on Sepolia and persist the tx hash in BlockchainRecord.
+
+    Runs in a daemon thread so the HTTP response is not delayed.
+
+    Duplicate-hash behaviour
+    ------------------------
+    In production every message has a unique hash because the ciphertext
+    embeds a random 12-byte nonce chosen at encrypt time — two messages with
+    the same plaintext therefore produce different hashes.  Duplicate hash
+    reverts only occur in testing when the same plaintext and nonce are
+    reused.  When a revert is detected this function calls
+    verify_hash_on_chain() to confirm the hash was already recorded in a
+    prior transaction; if so, eth_tx_hash is set to the sentinel "duplicate"
+    so the proof endpoint can still confirm the hash is anchored on-chain.
+    """
+    import logging
+    from backend.database import SessionLocal
+    from backend.blockchain.contract import record_message_digest, verify_hash_on_chain
+
+    logger = logging.getLogger(__name__)
+
+    if not integrity_hash:
+        logger.warning("msg %d: integrity_hash is empty — skipping chain submission", message_id)
+        return
+
+    if len(integrity_hash) != 64:
+        logger.error(
+            "msg %d: integrity_hash is %d chars (expected 64) — skipping; value: %r",
+            message_id, len(integrity_hash), integrity_hash,
+        )
+        return
+
+    eth_tx: str | None = None
+
+    try:
+        eth_tx = record_message_digest(f"0x{integrity_hash}")
+        logger.info("msg %d anchored on Sepolia: %s", message_id, eth_tx)
+
+    except EnvironmentError as exc:
+        # Missing SEPOLIA_RPC_URL, CONTRACT_ADDRESS, or DEPLOYER_PRIVATE_KEY.
+        # No point querying the chain without credentials.
+        logger.error("msg %d: blockchain env vars not configured: %r", message_id, exc)
+        return
+
+    except (ValueError, RuntimeError) as exc:
+        # ValueError  — ContractLogicError raised at build_transaction time
+        #               (contract rejects the call before the tx is broadcast).
+        # RuntimeError — receipt.status == 0 (revert after the tx was mined).
+        # Both can indicate "hash already recorded".
+        err_str = str(exc).lower()
+        if "reverted" in err_str or "rejected" in err_str:
+            try:
+                proof = verify_hash_on_chain(f"0x{integrity_hash}")
+            except Exception as ve:
+                logger.error(
+                    "msg %d: contract rejected submission and on-chain check failed — "
+                    "original=%r  verify_error=%r",
+                    message_id, exc, ve,
+                )
+                return
+
+            if proof.get("exists"):
+                logger.warning(
+                    "msg %d: hash already recorded on-chain at contract index %s "
+                    "(duplicate content — expected during testing, not in production "
+                    "because each message embeds a unique random nonce)",
+                    message_id, proof.get("index"),
+                )
+                eth_tx = "duplicate"
+            else:
+                logger.error(
+                    "msg %d: contract reverted but hash is not on-chain — "
+                    "possible gas issue or unexpected contract state: %r",
+                    message_id, exc,
+                )
+                return
+        else:
+            logger.error("msg %d: failed to anchor on Sepolia: %r", message_id, exc)
+            return
+
+    except Exception as exc:
+        logger.error("msg %d: unexpected error anchoring on Sepolia: %r", message_id, exc)
+        return
+
+    # Persist eth_tx_hash ("0x..." or "duplicate") into the BlockchainRecord row.
+    # "duplicate" is truthy, so get_blockchain_proof will still call
+    # verify_hash_on_chain and correctly confirm the hash is on-chain.
+    try:
+        with SessionLocal() as db:
+            rec = db.scalars(
+                select(models.BlockchainRecord).where(
+                    models.BlockchainRecord.message_id == message_id
+                )
+            ).first()
+            if rec:
+                rec.eth_tx_hash = eth_tx
+                db.commit()
+            else:
+                logger.warning("msg %d: BlockchainRecord not found", message_id)
+    except Exception as exc:
+        logger.error("msg %d: failed to persist eth_tx_hash=%r: %r", message_id, eth_tx, exc)
 
 
 # ---------------------------------------------------------------------------
@@ -354,6 +459,14 @@ def send_message(
 
     db.commit()
     db.refresh(message)
+
+    # Anchor the integrity hash on Sepolia in the background — the HTTP
+    # response is not held waiting for the ~15-30 s block confirmation.
+    threading.Thread(
+        target=_submit_to_chain,
+        args=(message.id, message.integrity_hash or ""),
+        daemon=True,
+    ).start()
 
     return {
         "id":              message.id,

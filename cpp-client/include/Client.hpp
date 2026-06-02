@@ -8,9 +8,9 @@
 #include "User.hpp"
 
 struct ClientConfig {
-    std::string base_url{"http://localhost:8000"};
+    std::string base_url{"https://team10.theburkenator.com"};
     // Set false for local dev servers that have no TLS certificate.
-    bool verify_ssl{false};
+    bool verify_ssl{true};
 };
 
 // HTTP client for the Secure Messenger backend API.

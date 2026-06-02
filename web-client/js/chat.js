@@ -245,18 +245,33 @@ function openConversation(senderName, el) {
   ).join('');
   lucide.createIcons();
 
-  // Decrypt listeners for received bubbles
-  thread.querySelectorAll('.b-decrypt-btn').forEach(btn => {
-    btn.addEventListener('click', () => handleInlineDecrypt(+btn.dataset.id, btn));
+  // Received bubbles — decrypt, forward, download
+  thread.querySelectorAll('.bubble-wrap.in[data-msg-id]').forEach(wrap => {
+    const msgId = +wrap.dataset.msgId;
+    const msg   = received.find(m => m.id === msgId);
+
+    wrap.querySelector('.b-decrypt-btn')
+      ?.addEventListener('click', e => handleInlineDecrypt(msgId, e.currentTarget));
+    wrap.querySelector('.b-forward-btn')
+      ?.addEventListener('click', () => showForwardUI(msgId, wrap));
+    wrap.querySelector('.b-download-btn')
+      ?.addEventListener('click', e => handleDownloadReceived(msgId, msg, wrap, e.currentTarget));
   });
 
-  // Delete / revoke listeners for sent history bubbles
+  // Sent history bubbles — delete, revoke, download
   thread.querySelectorAll('.bubble-wrap.out[data-msg-id]').forEach(wrap => {
     const msgId = +wrap.dataset.msgId;
+    const msg   = allSentMessages.find(m => m.id === msgId);
+
     wrap.querySelector('.b-delete-btn')
       ?.addEventListener('click', () => handleDeleteMessage(msgId, wrap));
     wrap.querySelector('.b-revoke-btn')
       ?.addEventListener('click', () => handleRevokeMessage(msgId, wrap));
+    wrap.querySelector('.b-download-btn')
+      ?.addEventListener('click', () => {
+        if (msg?._plaintext) triggerDownload(msgId, null, msg.created_at, msg._plaintext);
+        else if (msg)         handleDownloadSentMetadata(msg);
+      });
   });
 
   // Reset reply bar
@@ -273,7 +288,7 @@ function openConversation(senderName, el) {
 function renderBubble(msg) {
   const id      = msg.id;
   const preview = esc((msg.ciphertext ?? '').slice(0, 80)) + '…';
-  return `<div class="bubble-wrap in">
+  return `<div class="bubble-wrap in" data-msg-id="${id}">
     <div class="bubble">
       <div class="b-cipher" id="bc-${id}">
         <div class="b-cipher-label">
@@ -295,6 +310,16 @@ function renderBubble(msg) {
       <div class="b-plain hidden" id="bp-${id}"></div>
       <div class="b-error hidden" id="be-${id}"></div>
     </div>
+    <div class="b-in-actions">
+      <button class="b-action-btn b-forward-btn" title="Forward message">
+        <i data-lucide="forward" style="width:12px;height:12px"></i>
+        Forward
+      </button>
+      <button class="b-action-btn b-download-btn" title="Download message">
+        <i data-lucide="download" style="width:12px;height:12px"></i>
+        Download
+      </button>
+    </div>
     <div class="b-time">${fmtDate(msg.created_at)}</div>
   </div>`;
 }
@@ -312,6 +337,10 @@ function renderSentHistoryBubble(msg) {
       </div>
     </div>
     <div class="b-sent-actions">
+      <button class="b-action-btn b-download-btn" title="Download metadata">
+        <i data-lucide="download" style="width:12px;height:12px"></i>
+        Download
+      </button>
       <button class="b-action-btn b-revoke-btn" title="Revoke recipient access">
         <i data-lucide="shield-off" style="width:12px;height:12px"></i>
         Revoke
@@ -328,6 +357,10 @@ function renderSentHistoryBubble(msg) {
 function renderSentBubble(text, msgId) {
   const actions = msgId ? `
     <div class="b-sent-actions">
+      <button class="b-action-btn b-download-btn" title="Download message">
+        <i data-lucide="download" style="width:12px;height:12px"></i>
+        Download
+      </button>
       <button class="b-action-btn b-revoke-btn" title="Revoke recipient access">
         <i data-lucide="shield-off" style="width:12px;height:12px"></i>
         Revoke
@@ -337,7 +370,7 @@ function renderSentBubble(text, msgId) {
         Delete
       </button>
     </div>` : '';
-  return `<div class="bubble-wrap out">
+  return `<div class="bubble-wrap out"${msgId ? ` data-msg-id="${msgId}"` : ''}>
     <div class="bubble">
       <div class="b-plain">${esc(text)}</div>
     </div>
@@ -358,6 +391,17 @@ function appendSentBubble(threadId, text, msgId) {
       ?.addEventListener('click', () => handleDeleteMessage(msgId, wrap));
     wrap.querySelector('.b-revoke-btn')
       ?.addEventListener('click', () => handleRevokeMessage(msgId, wrap));
+    wrap.querySelector('.b-download-btn')
+      ?.addEventListener('click', () => {
+        const content = [
+          `SecureMsg — Sent Message`,
+          `Date:    ${new Date().toLocaleString()}`,
+          `ID:      ${msgId}`,
+          ``,
+          text,
+        ].join('\n');
+        downloadTxt(`sent-${msgId}.txt`, content);
+      });
   }
 
   thread.scrollTop = thread.scrollHeight;
@@ -635,6 +679,181 @@ function onRecipientInput() {
       if (convoEl) openConversation(username, convoEl);
     });
   });
+}
+
+// ── Forward ───────────────────────────────────────────────────────────────────
+
+function showForwardUI(msgId, bubbleWrap) {
+  if (bubbleWrap.querySelector('.b-forward-ui')) return; // already open
+
+  bubbleWrap.classList.add('b-forwarding');
+
+  const ui = document.createElement('div');
+  ui.className = 'b-forward-ui';
+  ui.innerHTML = `
+    <div class="b-forward-row">
+      <div class="b-forward-recipient-wrap">
+        <input type="text" class="b-forward-input" placeholder="Forward to username…" autocomplete="off">
+        <div class="b-forward-drop"></div>
+      </div>
+      <button class="b-action-btn b-forward-confirm" title="Send">
+        <i data-lucide="send" style="width:12px;height:12px"></i>
+      </button>
+      <button class="b-action-btn b-forward-cancel" title="Cancel">
+        <i data-lucide="x" style="width:12px;height:12px"></i>
+      </button>
+    </div>
+    <div class="b-forward-status"></div>`;
+
+  // Insert between .bubble and .b-in-actions
+  bubbleWrap.querySelector('.b-in-actions').before(ui);
+  lucide.createIcons();
+
+  const input   = ui.querySelector('.b-forward-input');
+  const drop    = ui.querySelector('.b-forward-drop');
+  const confirm = ui.querySelector('.b-forward-confirm');
+  const cancel  = ui.querySelector('.b-forward-cancel');
+  const status  = ui.querySelector('.b-forward-status');
+
+  let chosenUser = '';
+
+  input.focus();
+
+  input.addEventListener('input', () => {
+    const val = input.value.trim().toLowerCase();
+    drop.innerHTML = '';
+    chosenUser = '';
+    if (!val) return;
+    const me = getUsername();
+    allUsers
+      .filter(u => u.username !== me && u.username.toLowerCase().includes(val))
+      .slice(0, 6)
+      .forEach(u => {
+        const item = document.createElement('div');
+        item.className = 'b-forward-item';
+        item.textContent = u.username;
+        item.addEventListener('mousedown', () => {
+          input.value = u.username;
+          chosenUser  = u.username;
+          drop.innerHTML = '';
+        });
+        drop.appendChild(item);
+      });
+  });
+
+  input.addEventListener('blur', () => {
+    setTimeout(() => { drop.innerHTML = ''; }, 150);
+  });
+
+  cancel.addEventListener('click', () => {
+    ui.remove();
+    bubbleWrap.classList.remove('b-forwarding');
+  });
+
+  confirm.addEventListener('click', async () => {
+    const recipient = chosenUser || input.value.trim();
+    if (!recipient) return;
+
+    confirm.disabled = true;
+    confirm.innerHTML = '<span class="spinner"></span>';
+    status.textContent = '';
+
+    try {
+      const res = await authFetch(`${API}/messages/${msgId}/forward`, {
+        method:  'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body:    JSON.stringify({ recipient_username: recipient }),
+      });
+      if (res.status === 401) { clearSession(); window.location.href = 'index.html'; return; }
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}));
+        throw new Error(body.detail ?? 'Forward failed.');
+      }
+
+      status.textContent = `Forwarded to ${recipient}.`;
+      status.style.color = 'var(--green-600)';
+      input.disabled = true;
+      confirm.remove();
+      setTimeout(() => {
+        ui.remove();
+        bubbleWrap.classList.remove('b-forwarding');
+      }, 2000);
+    } catch (err) {
+      status.textContent = err.message;
+      status.style.color = 'var(--red-600)';
+      confirm.disabled = false;
+      confirm.innerHTML = '<i data-lucide="send" style="width:12px;height:12px"></i>';
+      lucide.createIcons();
+    }
+  });
+}
+
+// ── Download ───────────────────────────────────────────────────────────────────
+
+async function handleDownloadReceived(msgId, msg, bubbleWrap, btn) {
+  const plainEl = document.getElementById(`bp-${msgId}`);
+  const errEl   = document.getElementById(`be-${msgId}`);
+
+  // Already decrypted — grab visible text and save
+  if (plainEl && !plainEl.classList.contains('hidden') && plainEl.textContent.trim()) {
+    triggerDownload(msgId, msg?.sender_username, msg?.created_at, plainEl.textContent.trim());
+    return;
+  }
+
+  // Decrypt first, then save
+  const decryptBtn = bubbleWrap.querySelector('.b-decrypt-btn');
+  if (!decryptBtn) return;
+
+  const savedHTML = btn.innerHTML;
+  btn.disabled = true;
+  btn.innerHTML = '<span class="spinner"></span>';
+
+  await handleInlineDecrypt(msgId, decryptBtn);
+
+  // Check decrypt succeeded (error element is hidden and plain text is visible)
+  const text = plainEl?.textContent.trim() ?? '';
+  if (text && (!errEl || errEl.classList.contains('hidden'))) {
+    triggerDownload(msgId, msg?.sender_username, msg?.created_at, text);
+  }
+
+  btn.disabled = false;
+  btn.innerHTML = savedHTML;
+  lucide.createIcons();
+}
+
+function handleDownloadSentMetadata(msg) {
+  const date = new Date((msg.created_at ?? '') + (msg.created_at?.endsWith('Z') ? '' : 'Z'));
+  const content = [
+    `SecureMsg — Sent Message`,
+    `To:      ${msg.recipient_username ?? 'Unknown'}`,
+    `Date:    ${date.toLocaleString()}`,
+    `ID:      ${msg.id}`,
+    ``,
+    `Note: Sent messages are encrypted for the recipient.`,
+    `      The sender cannot decrypt their own sent messages.`,
+  ].join('\n');
+  downloadTxt(`sent-${msg.id}.txt`, content);
+}
+
+function triggerDownload(msgId, fromUsername, createdAt, plaintext) {
+  const date = new Date((createdAt ?? '') + ((createdAt ?? '').endsWith('Z') ? '' : 'Z'));
+  const content = [
+    `SecureMsg — Message`,
+    `From:    ${fromUsername ?? 'Unknown'}`,
+    `Date:    ${date.toLocaleString()}`,
+    `ID:      ${msgId}`,
+    ``,
+    plaintext,
+  ].join('\n');
+  downloadTxt(`message-${msgId}.txt`, content);
+}
+
+function downloadTxt(filename, content) {
+  const a    = document.createElement('a');
+  a.href     = URL.createObjectURL(new Blob([content], { type: 'text/plain' }));
+  a.download = filename;
+  a.click();
+  URL.revokeObjectURL(a.href);
 }
 
 // ── Logout ─────────────────────────────────────────────────────────────────────

@@ -570,8 +570,24 @@ def forward_message(
     The server creates a new `message_access` row; the ciphertext is NOT
     copied (the same encrypted blob is shared).
     """
-    message = _load_active_message(message_id, db)
-    _require_read_access(message, current_user, db)   # sender or recipient
+    # Load without the is_deleted gate: a sender's soft-delete only hides the
+    # message from the sender's own view; recipients who still have a
+    # MessageAccess row retain read (and forward) access.
+    message = db.get(models.Message, message_id)
+    if message is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND,
+                            detail="Message not found.")
+
+    if message.sender_id == current_user.id:
+        # Sender: may not forward after they deleted their own copy.
+        if message.is_deleted:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND,
+                                detail="Message not found.")
+    else:
+        # Recipient: access is controlled by MessageAccess row only.
+        if _get_access_record(message.id, current_user.id, db) is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND,
+                                detail="Message not found.")
 
     new_recipient = _lookup_active_user(body.recipient_username, db)
 

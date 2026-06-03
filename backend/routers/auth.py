@@ -43,6 +43,7 @@ from backend import models
 from backend.crypto import DUMMY_HASH, hash_password, needs_rehash, verify_password
 from backend.database import get_db
 from backend.dependencies import create_access_token, get_current_user
+from backend.limiter import limiter
 from backend.schemas import (
     LogoutRequest,
     MessageOut,
@@ -197,8 +198,10 @@ def register(
     responses={
         401: {"description": "Invalid credentials or account disabled"},
         422: {"description": "Request body failed schema validation"},
+        429: {"description": "Too many requests"},
     },
 )
+@limiter.limit("5/minute")
 def login(
     payload: UserLogin,
     request: Request,

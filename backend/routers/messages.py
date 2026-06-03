@@ -425,20 +425,10 @@ def send_message(
     current_user: models.User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> dict:
-    """Send an AES-256-GCM encrypted message to *recipient_username*.
+    """Send an encrypted message to *recipient_username*.
 
     The server stores the encrypted payload opaquely — it never decrypts the
-    ciphertext, never sees the message_key, and never has access to plaintext.
-
-    **Client responsibilities (before calling this endpoint):**
-    1. Fetch `recipient.public_key` from `/users/{username}`.
-    2. Generate a random `message_key = os.urandom(32)`.
-    3. Compute the canonical AAD: `"v1:sender={my_id}:recipient={their_id}:msg=0"`.
-       (Use `0` for the message ID at encrypt time; the server returns the real
-       ID in the response, which the client should store for future AAD use.)
-    4. Encrypt: `ciphertext, nonce = aead.encrypt(plaintext, message_key, aad)`.
-    5. Wrap the key: `encrypted_key = RSA_OAEP(recipient.public_key, message_key)`.
-    6. Base64-encode `ciphertext` and `nonce` and post them here.
+    ciphertext and never has access to plaintext.
 
     The server combines nonce and ciphertext into a single stored blob
     (base64(nonce ‖ ciphertext)) so the download endpoint can return both
@@ -907,11 +897,7 @@ def download_message(
     - `ciphertext`       — the combined stored blob (nonce ‖ ciphertext)
     - `nonce`            — the first 12 decoded bytes, re-encoded as base64
     - `associated_data`  — the canonical AAD; pass this to `decrypt()`
-    - `encrypted_key`    — the recipient's wrapped symmetric key
-
-    **Decryption steps (client side):**
-    1. Unwrap `encrypted_key` using your private key → `message_key`
-    2. Call `aead.decrypt(ciphertext_b64decode, message_key, nonce_b64decode, aad)`
+    - `encrypted_key`    — the recipient's wrapped key material
 
     Marks the message as read in `message_access` (only for recipients;
     senders are implicitly always "read").

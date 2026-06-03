@@ -69,7 +69,7 @@ async function handleRegister(e) {
       body: JSON.stringify({ username, email, password, public_key: publicKeyB64 }),
     });
     const data = await res.json();
-    if (!res.ok) throw new Error(data.detail ?? 'Registration failed.');
+    if (!res.ok) throw new Error(parseApiError(data, 'Registration failed.'));
 
     // Store the non-extractable private key in IndexedDB.
     // Key bytes are permanently inaccessible to JavaScript — XSS can use the
@@ -113,7 +113,7 @@ async function handleLogin(e) {
       body: JSON.stringify({ username, password }),
     });
     const data = await res.json();
-    if (!res.ok) throw new Error(data.detail ?? 'Login failed.');
+    if (!res.ok) throw new Error(parseApiError(data, 'Login failed.'));
 
     saveSession(data.access_token, data.refresh_token, username);
 
@@ -160,6 +160,29 @@ async function handleLogin(e) {
     btn.disabled = false;
     btn.textContent = 'Sign In';
   }
+}
+
+// ---------- API error helpers -------------------------------------------------
+
+/**
+ * FastAPI returns validation errors as:
+ *   { detail: [ { loc, msg, type }, … ] }   (422 Unprocessable Entity)
+ * and plain errors as:
+ *   { detail: "some string" }
+ *
+ * Pydantic v2 prefixes value_error messages with "Value error, " — strip it.
+ */
+function parseApiError(data, fallback) {
+  const { detail } = data;
+  if (!detail) return fallback;
+  if (typeof detail === 'string') return detail;
+  if (Array.isArray(detail) && detail.length > 0) {
+    return detail
+      .map(e => (e.msg ?? '').replace(/^Value error,\s*/i, ''))
+      .filter(Boolean)
+      .join(' ') || fallback;
+  }
+  return fallback;
 }
 
 // ---------- Status helpers ----------------------------------------------------

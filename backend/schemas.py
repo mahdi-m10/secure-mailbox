@@ -5,8 +5,11 @@ Keeps API contracts separate from database models.
 """
 
 import base64
+import re
 from datetime import datetime
 from pydantic import BaseModel, EmailStr, Field, ConfigDict, field_validator
+
+USERNAME_RE = re.compile(r"^[a-zA-Z0-9_.-]{3,64}$")
 
 
 # ===========================================================================
@@ -24,6 +27,13 @@ class UserCreate(BaseModel):
         description="PEM/base64-encoded public key for end-to-end encryption.",
     )
 
+    @field_validator("username")
+    @classmethod
+    def _username_chars(cls, v: str) -> str:
+        if not USERNAME_RE.match(v):
+            raise ValueError("Username must be 3–64 characters: letters, digits, _ . - only.")
+        return v
+
 
 class UserLogin(BaseModel):
     """Payload for POST /auth/login."""
@@ -35,6 +45,13 @@ class UserLogin(BaseModel):
     # Pydantic 422, so we don't leak which field is wrong via the error path.
     username: str = Field(..., max_length=64)
     password: str = Field(..., max_length=128)
+
+    @field_validator("username")
+    @classmethod
+    def _username_chars(cls, v: str) -> str:
+        if not USERNAME_RE.match(v):
+            raise ValueError("Username must be 3–64 characters: letters, digits, _ . - only.")
+        return v
 
 
 class UserResponse(BaseModel):

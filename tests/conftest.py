@@ -131,7 +131,7 @@ def auth_headers(client):
 
 @pytest.fixture
 def make_message_payload():
-    """Return a helper that builds a valid MessageSend payload with random crypto material."""
+    """Return a helper that builds a valid FileUpload payload with random crypto material."""
 
     def _payload(recipient_username: str) -> dict:
         # Random nonce (12 bytes) and ciphertext (32 bytes ≥ 16-byte GCM tag minimum).
@@ -141,6 +141,9 @@ def make_message_payload():
             "ciphertext": base64.b64encode(os.urandom(32)).decode(),
             "encrypted_key": base64.b64encode(os.urandom(32)).decode(),
             "subject": "Test subject",
+            "filename": "test.txt",
+            "content_type": "text/plain",
+            "size_bytes": 16,
         }
 
     return _payload

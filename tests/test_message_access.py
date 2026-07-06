@@ -1,10 +1,10 @@
 """
-Tests for message access control.
+Tests for file access control.
 
-Access-control model (from messages.py):
+Access-control model (from routers/messages.py):
 - Read operations return 404 (not 403) on failure to prevent IDOR.
 - Sender soft-delete (DELETE /messages/{id}) sets is_deleted=True but does NOT
-  remove the recipient's MessageAccess row, so recipients retain download access.
+  remove the recipient's FileAccess row, so recipients retain download access.
 """
 
 
@@ -29,7 +29,7 @@ def test_user_cannot_access_another_users_message_returns_404(
     assert resp.status_code == 201
     message_id = resp.json()["id"]
 
-    # Charlie has no MessageAccess row — must receive 404, not 403.
+    # Charlie has no FileAccess row — must receive 404, not 403.
     resp = client.get(
         f"/messages/{message_id}/download",
         headers=auth_headers("charlie"),
@@ -58,7 +58,7 @@ def test_deleted_message_still_accessible_by_recipient(
     resp = client.delete(f"/messages/{message_id}", headers=alice_headers)
     assert resp.status_code == 200
 
-    # Bob's MessageAccess row is untouched — he must still be able to download.
+    # Bob's FileAccess row is untouched — he must still be able to download.
     resp = client.get(
         f"/messages/{message_id}/download",
         headers=auth_headers("bob"),

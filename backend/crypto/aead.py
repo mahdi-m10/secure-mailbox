@@ -108,7 +108,7 @@ def encrypt(
         A 32-byte (256-bit) symmetric key.  Generate with ``os.urandom(32)``.
         For end-to-end encryption this is the per-message symmetric key that
         is itself encrypted (wrapped) with the recipient's public key and
-        stored in ``message_access.encrypted_key``.
+        stored in ``file_access.encrypted_key``.
     associated_data:
         Optional bytes that are **authenticated but not encrypted**.  They are
         fed into the GCM authentication tag computation but do not appear in

@@ -21,7 +21,7 @@ Beyond authentication, each endpoint enforces one of two ownership rules:
     → 403 Forbidden if the requester is not the sender.
 
   Read operations (download, forward):
-    A row must exist in message_access where recipient_id == current_user.id
+    A row must exist in file_access where recipient_id == current_user.id
     OR the requester is the original sender.
     → 404 Not Found if neither condition holds.
       (404 rather than 403: returning 403 would confirm the message exists
@@ -63,18 +63,16 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session, aliased
 from web3 import Web3
 
-from backend.blockchain.contract import record_message_digest
-
 from backend import models
 from backend.database import get_db
 from backend.dependencies import get_current_user
 from backend.schemas import (
-    ForwardRequest,
-    MessageDownloadResponse,
-    MessageListItem,
-    MessageOut,
-    MessageSend,
+    DetailResponse,
+    FileDownloadResponse,
+    FileListItem,
+    FileUpload,
     RevokeRequest,
+    ShareRequest,
 )
 
 router = APIRouter(prefix="/messages", tags=["messages"])
@@ -126,7 +124,7 @@ def _canonical_aad(sender_id: int | None, recipient_id: int, message_id: int) ->
       - A ciphertext cannot be replayed in a different conversation.
       - A message forwarded to a new recipient requires re-encryption with
         the new recipient's ID in the AAD (or the forward creates a new
-        message row — our implementation creates a new message_access row
+        message row — our implementation creates a new file_access row
         without changing the ciphertext, so the download endpoint returns
         the AAD for the original recipient pair).
     """
@@ -137,48 +135,7 @@ def _canonical_aad(sender_id: int | None, recipient_id: int, message_id: int) ->
 # Blockchain helpers
 # ---------------------------------------------------------------------------
 
-def _submit_to_chain(message_id: int, integrity_hash: str) -> None:
-    """Anchor integrity_hash on Sepolia and store the tx hash in BlockchainRecord.
-
-    Runs in a daemon thread so the HTTP response is not delayed.
-    All failures are logged; the SHA-256 hash is still durable in SQLite
-    even if the Sepolia submission fails.
-    """
-    import logging
-    from backend.database import SessionLocal
-
-    logger = logging.getLogger(__name__)
-
-    if not integrity_hash:
-        logger.warning("msg %d: integrity_hash is empty — skipping chain submission", message_id)
-        return
-
-    if len(integrity_hash) != 64:
-        logger.error(
-            "msg %d: integrity_hash is %d chars (expected 64) — skipping chain submission; value: %r",
-            message_id, len(integrity_hash), integrity_hash,
-        )
-        return
-
-    try:
-        tx_hash = record_message_digest(f"0x{integrity_hash}")
-        with SessionLocal() as db:
-            rec = db.scalars(
-                select(models.BlockchainRecord).where(
-                    models.BlockchainRecord.message_id == message_id
-                )
-            ).first()
-            if rec:
-                rec.eth_tx_hash = tx_hash
-                db.commit()
-                logger.info("msg %d anchored on Sepolia: %s", message_id, tx_hash)
-            else:
-                logger.warning("msg %d: BlockchainRecord not found after commit", message_id)
-    except Exception as exc:
-        logger.error("msg %d: failed to anchor on Sepolia: %r", message_id, exc)
-
-
-def _append_blockchain_record(message: models.Message, db: Session) -> None:
+def _append_blockchain_record(message: models.FileObject, db: Session) -> None:
     """Append a new BlockchainRecord chaining *message* to the audit log.
 
     Each record stores:
@@ -209,7 +166,7 @@ def _append_blockchain_record(message: models.Message, db: Session) -> None:
     ).hexdigest()
 
     db.add(models.BlockchainRecord(
-        message_id=message.id,
+        file_id=message.id,
         message_hash=message_hash,
         previous_hash=previous_hash,
         block_hash=block_hash,
@@ -309,7 +266,7 @@ def _submit_to_chain(message_id: int, integrity_hash: str) -> None:
         with SessionLocal() as db:
             rec = db.scalars(
                 select(models.BlockchainRecord).where(
-                    models.BlockchainRecord.message_id == message_id
+                    models.BlockchainRecord.file_id == message_id
                 )
             ).first()
             if rec:
@@ -325,21 +282,21 @@ def _submit_to_chain(message_id: int, integrity_hash: str) -> None:
 # Access-control helpers
 # ---------------------------------------------------------------------------
 
-def _load_active_message(message_id: int, db: Session) -> models.Message:
+def _load_active_message(message_id: int, db: Session) -> models.FileObject:
     """Return the Message row or raise 404.
 
     Raises 404 (not 403) regardless of whether the message exists but is
     deleted — revealing that a message *was* deleted would confirm its
     prior existence to an unauthorised requester.
     """
-    msg = db.get(models.Message, message_id)
+    msg = db.get(models.FileObject, message_id)
     if msg is None or msg.is_deleted:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND,
                             detail="Message not found.")
     return msg
 
 
-def _require_sender(message: models.Message, current_user: models.User) -> None:
+def _require_sender(message: models.FileObject, current_user: models.User) -> None:
     """Raise 403 if *current_user* is not the sender of *message*.
 
     403 (not 404) is appropriate here: by the time this is called the caller
@@ -354,35 +311,35 @@ def _require_sender(message: models.Message, current_user: models.User) -> None:
 
 def _get_access_record(
     message_id: int, user_id: int, db: Session
-) -> models.MessageAccess | None:
-    """Return the MessageAccess row for (message_id, user_id), or None."""
+) -> models.FileAccess | None:
+    """Return the FileAccess row for (message_id, user_id), or None."""
     return db.scalars(
-        select(models.MessageAccess).where(
-            models.MessageAccess.message_id == message_id,
-            models.MessageAccess.recipient_id == user_id,
+        select(models.FileAccess).where(
+            models.FileAccess.file_id == message_id,
+            models.FileAccess.recipient_id == user_id,
         )
     ).first()
 
 
 def _require_read_access(
-    message: models.Message,
+    message: models.FileObject,
     current_user: models.User,
     db: Session,
-) -> models.MessageAccess | None:
+) -> models.FileAccess | None:
     """Verify current_user may read *message*; return their access record.
 
     Allowed if:
       - current_user is the sender, OR
-      - a MessageAccess row exists for current_user as recipient.
+      - a FileAccess row exists for current_user as recipient.
 
-    Returns the MessageAccess row (or None if the sender is reading their own
+    Returns the FileAccess row (or None if the sender is reading their own
     message — senders have no recipient row).
 
     Raises 404 (not 403) on failure to prevent IDOR: returning 403 would
     confirm the message exists to someone who has no access to it.
     """
     if message.sender_id == current_user.id:
-        return None   # sender always has access; no MessageAccess row for them
+        return None   # sender always has access; no FileAccess row for them
 
     access = _get_access_record(message.id, current_user.id, db)
     if access is None:
@@ -411,7 +368,7 @@ def _lookup_active_user(username: str, db: Session) -> models.User:
 
 @router.post(
     "/send",
-    response_model=MessageListItem,
+    response_model=FileListItem,
     status_code=status.HTTP_201_CREATED,
     summary="Send an encrypted message",
     responses={
@@ -421,7 +378,7 @@ def _lookup_active_user(username: str, db: Session) -> models.User:
     },
 )
 def send_message(
-    body: MessageSend,
+    body: FileUpload,
     current_user: models.User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> dict:
@@ -447,7 +404,7 @@ def send_message(
 
     # ------------------------------------------------------------------
     # 2. Pack nonce ‖ ciphertext into the single stored blob.
-    #    The Pydantic validators on MessageSend already confirmed both are
+    #    The Pydantic validators on FileUpload already confirmed both are
     #    valid base64 and the nonce decodes to exactly 12 bytes.
     # ------------------------------------------------------------------
     stored_blob = _pack(body.nonce, body.ciphertext)
@@ -470,10 +427,13 @@ def send_message(
     #    the blockchain record and access row can reference it in the same
     #    transaction.
     # ------------------------------------------------------------------
-    message = models.Message(
+    message = models.FileObject(
         sender_id=current_user.id,
         ciphertext=stored_blob,
         subject=body.subject,
+        filename=body.filename,
+        content_type=body.content_type,
+        size_bytes=body.size_bytes,
         integrity_hash=integrity,
     )
     db.add(message)
@@ -482,8 +442,8 @@ def send_message(
     # ------------------------------------------------------------------
     # 5. Create the recipient's access record.
     # ------------------------------------------------------------------
-    db.add(models.MessageAccess(
-        message_id=message.id,
+    db.add(models.FileAccess(
+        file_id=message.id,
         recipient_id=recipient.id,
         encrypted_key=body.encrypted_key,
     ))
@@ -510,6 +470,9 @@ def send_message(
         "sender_username":    current_user.username,
         "recipient_username": body.recipient_username,
         "subject":            message.subject,
+        "filename":           message.filename,
+        "content_type":       message.content_type,
+        "size_bytes":         message.size_bytes,
         "is_read":            False,
         "is_deleted":         message.is_deleted,
         "created_at":         message.created_at,
@@ -522,7 +485,7 @@ def send_message(
 
 @router.get(
     "/inbox",
-    response_model=list[MessageListItem],
+    response_model=list[FileListItem],
     summary="List received messages",
 )
 def get_inbox(
@@ -542,21 +505,21 @@ def get_inbox(
     """
     # Single JOIN query to avoid N+1 lookups for sender usernames.
     stmt = (
-        select(models.Message, models.MessageAccess, models.User)
+        select(models.FileObject, models.FileAccess, models.User)
         .join(
-            models.MessageAccess,
-            models.MessageAccess.message_id == models.Message.id,
+            models.FileAccess,
+            models.FileAccess.file_id == models.FileObject.id,
         )
         .outerjoin(
             models.User,
-            models.User.id == models.Message.sender_id,
+            models.User.id == models.FileObject.sender_id,
         )
         .where(
-            models.MessageAccess.recipient_id == current_user.id,
+            models.FileAccess.recipient_id == current_user.id,
             # is_deleted is a sender-side flag only; recipients retain inbox
             # visibility even after the sender deletes their copy.
         )
-        .order_by(models.Message.created_at.desc())
+        .order_by(models.FileObject.created_at.desc())
         .offset(skip)
         .limit(limit)
     )
@@ -568,6 +531,9 @@ def get_inbox(
             "sender_id":       msg.sender_id,
             "sender_username": sender.username if sender else None,
             "subject":         msg.subject,
+            "filename":        msg.filename,
+            "content_type":    msg.content_type,
+            "size_bytes":      msg.size_bytes,
             "is_read":         access.is_read,
             "is_deleted":      msg.is_deleted,
             "is_forwarded":    bool(msg.is_forwarded),
@@ -583,7 +549,7 @@ def get_inbox(
 
 @router.get(
     "/sent",
-    response_model=list[MessageListItem],
+    response_model=list[FileListItem],
     summary="List sent messages",
 )
 def get_sent(
@@ -601,34 +567,34 @@ def get_sent(
     # sender join used elsewhere in the query.
     RecipientUser = aliased(models.User, name="recipient")
 
-    # Subquery: for each message, pick the *first* MessageAccess row by id.
+    # Subquery: for each message, pick the *first* FileAccess row by id.
     # This gives us the original direct recipient and avoids duplicate rows
     # when a message has been forwarded to additional people.
     first_access_sq = (
         select(
-            func.min(models.MessageAccess.id).label("id"),
-            models.MessageAccess.message_id,
+            func.min(models.FileAccess.id).label("id"),
+            models.FileAccess.file_id,
         )
-        .group_by(models.MessageAccess.message_id)
+        .group_by(models.FileAccess.file_id)
         .subquery()
     )
 
     stmt = (
-        select(models.Message, RecipientUser)
-        .join(first_access_sq, first_access_sq.c.message_id == models.Message.id)
+        select(models.FileObject, RecipientUser)
+        .join(first_access_sq, first_access_sq.c.file_id == models.FileObject.id)
         .join(
-            models.MessageAccess,
-            models.MessageAccess.id == first_access_sq.c.id,
+            models.FileAccess,
+            models.FileAccess.id == first_access_sq.c.id,
         )
         .join(
             RecipientUser,
-            RecipientUser.id == models.MessageAccess.recipient_id,
+            RecipientUser.id == models.FileAccess.recipient_id,
         )
         .where(
-            models.Message.sender_id == current_user.id,
-            models.Message.is_deleted.is_(False),
+            models.FileObject.sender_id == current_user.id,
+            models.FileObject.is_deleted.is_(False),
         )
-        .order_by(models.Message.created_at.desc())
+        .order_by(models.FileObject.created_at.desc())
         .offset(skip)
         .limit(limit)
     )
@@ -641,6 +607,9 @@ def get_sent(
             "sender_username":    current_user.username,
             "recipient_username": recipient.username,
             "subject":            msg.subject,
+            "filename":           msg.filename,
+            "content_type":       msg.content_type,
+            "size_bytes":         msg.size_bytes,
             "is_read":            True,   # sender always "read" their own outgoing message
             "is_deleted":         msg.is_deleted,
             "created_at":         msg.created_at,
@@ -655,7 +624,7 @@ def get_sent(
 
 @router.delete(
     "/{message_id}",
-    response_model=MessageOut,
+    response_model=DetailResponse,
     summary="Soft-delete a sent message",
     responses={
         403: {"description": "Not the sender"},
@@ -690,7 +659,7 @@ def delete_message(
 
 @router.post(
     "/{message_id}/forward",
-    response_model=MessageOut,
+    response_model=DetailResponse,
     summary="Forward a message to a new recipient",
     responses={
         403: {"description": "No read access to this message"},
@@ -700,7 +669,7 @@ def delete_message(
 )
 def forward_message(
     message_id: int,
-    body: ForwardRequest,
+    body: ShareRequest,
     current_user: models.User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> dict:
@@ -717,13 +686,13 @@ def forward_message(
     Without this, the new recipient receives the ciphertext but cannot
     unwrap the key and therefore cannot decrypt it.
 
-    The server creates a new `message_access` row; the ciphertext is NOT
+    The server creates a new `file_access` row; the ciphertext is NOT
     copied (the same encrypted blob is shared).
     """
     # Load without the is_deleted gate: a sender's soft-delete only hides the
     # message from the sender's own view; recipients who still have a
-    # MessageAccess row retain read (and forward) access.
-    message = db.get(models.Message, message_id)
+    # FileAccess row retain read (and forward) access.
+    message = db.get(models.FileObject, message_id)
     if message is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND,
                             detail="Message not found.")
@@ -734,7 +703,7 @@ def forward_message(
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND,
                                 detail="Message not found.")
     else:
-        # Recipient: access is controlled by MessageAccess row only.
+        # Recipient: access is controlled by FileAccess row only.
         if _get_access_record(message.id, current_user.id, db) is None:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND,
                                 detail="Message not found.")
@@ -763,18 +732,21 @@ def forward_message(
         stored_blob = _pack(body.new_nonce, body.new_ciphertext)
         integrity   = bytes(Web3.keccak(text=stored_blob)).hex()  # 64-char hex, no 0x
 
-        fwd_msg = models.Message(
+        fwd_msg = models.FileObject(
             sender_id=current_user.id,
             ciphertext=stored_blob,
             subject=message.subject,
+            filename=message.filename,
+            content_type=message.content_type,
+            size_bytes=message.size_bytes,
             integrity_hash=integrity,
             is_forwarded=True,
         )
         db.add(fwd_msg)
         db.flush()   # allocate fwd_msg.id
 
-        db.add(models.MessageAccess(
-            message_id=fwd_msg.id,
+        db.add(models.FileAccess(
+            file_id=fwd_msg.id,
             recipient_id=new_recipient.id,
             encrypted_key=body.new_encrypted_key,
         ))
@@ -788,11 +760,11 @@ def forward_message(
             daemon=True,
         ).start()
     else:
-        # ── Legacy path: share existing message_access row ───────────────
+        # ── Legacy path: share existing file_access row ───────────────
         # The new recipient receives the original ciphertext but cannot
         # decrypt it (it was encrypted for the original recipient's key).
-        db.add(models.MessageAccess(
-            message_id=message.id,
+        db.add(models.FileAccess(
+            file_id=message.id,
             recipient_id=new_recipient.id,
             encrypted_key=body.encrypted_key,
         ))
@@ -807,7 +779,7 @@ def forward_message(
 
 @router.post(
     "/{message_id}/revoke",
-    response_model=MessageOut,
+    response_model=DetailResponse,
     summary="Revoke message access",
     responses={
         403: {"description": "Not the sender"},
@@ -827,7 +799,7 @@ def revoke_message(
     and BlockchainRecord are preserved (RESTRICT FK); only the access flag changes.
 
     **With `recipient_username`** — targeted revocation: removes that specific
-    recipient's `message_access` row.  Other recipients are unaffected.
+    recipient's `file_access` row.  Other recipients are unaffected.
     The message itself remains active; the server simply stops serving the
     ciphertext to that one user.
 
@@ -839,14 +811,14 @@ def revoke_message(
     _require_sender(message, current_user)
 
     if body.recipient_username is None:
-        # Full revocation: remove every MessageAccess row so no recipient can
+        # Full revocation: remove every FileAccess row so no recipient can
         # download the message.  The message row, ciphertext, and blockchain
         # record are intentionally preserved — revocation is an access-control
         # action, not a deletion.  is_deleted is NOT set so the sender can still
         # see the message in their sent list (the frontend shows "Access revoked").
         access_rows = db.scalars(
-            select(models.MessageAccess).where(
-                models.MessageAccess.message_id == message.id
+            select(models.FileAccess).where(
+                models.FileAccess.file_id == message.id
             )
         ).all()
         for row in access_rows:
@@ -875,7 +847,7 @@ def revoke_message(
 
 @router.get(
     "/{message_id}/download",
-    response_model=MessageDownloadResponse,
+    response_model=FileDownloadResponse,
     summary="Download a message's encrypted payload",
     responses={
         404: {"description": "Message not found or no access"},
@@ -889,7 +861,7 @@ def download_message(
     """Return the full encrypted payload needed to decrypt a message.
 
     Verifies that `current_user` is either the sender or an authorised
-    recipient (via `message_access`).  Returns 404 — not 403 — on any
+    recipient (via `file_access`).  Returns 404 — not 403 — on any
     access failure to prevent IDOR: a 403 would confirm the message exists
     to someone who has no business knowing that.
 
@@ -899,12 +871,12 @@ def download_message(
     - `associated_data`  — the canonical AAD; pass this to `decrypt()`
     - `encrypted_key`    — the recipient's wrapped key material
 
-    Marks the message as read in `message_access` (only for recipients;
+    Marks the message as read in `file_access` (only for recipients;
     senders are implicitly always "read").
     """
     # Load the raw message row without the is_deleted gate so that recipients
     # can still download a message the sender soft-deleted (delete is sender-only).
-    message = db.get(models.Message, message_id)
+    message = db.get(models.FileObject, message_id)
     if message is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND,
                             detail="Message not found.")
@@ -916,7 +888,7 @@ def download_message(
                                 detail="Message not found.")
         access = None
     else:
-        # Recipient: access is controlled solely by the MessageAccess row.
+        # Recipient: access is controlled solely by the FileAccess row.
         # A missing row means either the message never existed for them, or
         # access was revoked — both surface as 404 to prevent IDOR.
         access = _get_access_record(message.id, current_user.id, db)
@@ -972,6 +944,9 @@ def download_message(
         "associated_data": aad,
         "encrypted_key":   access.encrypted_key if access else None,
         "subject":         message.subject,
+        "filename":        message.filename,
+        "content_type":    message.content_type,
+        "size_bytes":      message.size_bytes,
         "integrity_hash":  message.integrity_hash,
         "is_read":         access.is_read if access else True,
         "created_at":      message.created_at,
@@ -1008,7 +983,7 @@ def get_blockchain_proof(
       on_chain      — contract record {exists, hash, timestamp, recorder} or null
       on_chain_match— True when on-chain hash == computed hash, or null
     """
-    message = db.get(models.Message, message_id)
+    message = db.get(models.FileObject, message_id)
     if message is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND,
                             detail="Message not found.")

@@ -124,54 +124,6 @@ class PublicKeyUpload(BaseModel):
 
 
 # ===========================================================================
-# Message schemas
-# ===========================================================================
-
-class MessageCreate(BaseModel):
-    """Payload for POST /messages — sending an encrypted message."""
-
-    recipient_ids: list[int] = Field(
-        ...,
-        min_length=1,
-        description="One or more user IDs that should receive this message.",
-    )
-    ciphertext: str = Field(
-        ...,
-        description="Base64-encoded encrypted message payload.",
-    )
-    subject: str | None = Field(
-        default=None,
-        max_length=512,
-        description="Optional (possibly encrypted) subject line.",
-    )
-    encrypted_keys: dict[int, str] = Field(
-        default_factory=dict,
-        description=(
-            "Mapping of recipient_id → wrapped symmetric key "
-            "(encrypted with that recipient's public key)."
-        ),
-    )
-    integrity_hash: str | None = Field(
-        default=None,
-        description="HMAC / SHA-256 integrity tag for tamper detection.",
-    )
-
-
-class MessageResponse(BaseModel):
-    """Message representation returned by the API."""
-
-    model_config = ConfigDict(from_attributes=True)
-
-    id: int
-    sender_id: int | None
-    ciphertext: str
-    subject: str | None
-    integrity_hash: str | None
-    is_deleted: bool
-    created_at: datetime
-
-
-# ===========================================================================
 # Auth / token schemas
 # ===========================================================================
 
@@ -194,8 +146,8 @@ class TokenData(BaseModel):
 # Generic response wrappers
 # ===========================================================================
 
-class MessageOut(BaseModel):
-    """Generic success message envelope."""
+class DetailResponse(BaseModel):
+    """Generic success detail envelope."""
 
     detail: str
 
@@ -241,17 +193,39 @@ class PasswordChange(BaseModel):
 
 
 # ===========================================================================
-# Message operation schemas
+# File operation schemas
 # ===========================================================================
 
-class MessageSend(BaseModel):
-    """Body for POST /messages/send — send an encrypted message."""
+class FileUpload(BaseModel):
+    """Body for uploading an encrypted file to a recipient's mailbox.
+
+    (Currently served by POST /messages/send; the endpoint rename to
+    POST /files/upload lands with the router rework.)
+    """
 
     recipient_username: str = Field(
         ...,
         min_length=1,
         max_length=64,
         description="Username of the intended recipient.",
+    )
+
+    # ── File metadata (optional, advisory) ────────────────────────────────
+    # Stored verbatim; visible to the server (see docs/crypto-design.md §8.5).
+    filename: str | None = Field(
+        default=None,
+        max_length=255,
+        description="Original filename, for display and download naming.",
+    )
+    content_type: str | None = Field(
+        default=None,
+        max_length=127,
+        description="MIME type of the plaintext (advisory; server never verifies).",
+    )
+    size_bytes: int | None = Field(
+        default=None,
+        ge=0,
+        description="Plaintext size in bytes, as reported by the client.",
     )
 
     # The ciphertext is whatever the client's AES-256-GCM encrypt() call
@@ -270,27 +244,27 @@ class MessageSend(BaseModel):
         description="Base64-encoded 12-byte (96-bit) AES-256-GCM nonce.",
     )
 
-    # The server enforces the canonical AAD convention
-    # "v1:sender={id}:recipient={id}:msg={id}" and returns it in the download
-    # response.  This field is accepted from the client for documentation and
-    # may be used in future for client-side verification, but the server
-    # always computes the authoritative value from message metadata.
+    # The server computes a canonical AAD string and returns it in the
+    # download response.  NOTE: no client currently binds this string into
+    # the AEAD — context binding today comes from the HPKE key schedule only
+    # (see docs/crypto-design.md §7).  The field is informational.
     associated_data: str | None = Field(
         default=None,
         description=(
-            "Associated data used by the client for AEAD. The server computes "
-            "the canonical AAD from message metadata; this field is informational."
+            "Informational context string. Not currently bound into the AEAD; "
+            "see docs/crypto-design.md §7."
         ),
     )
 
-    # Wrapped (public-key-encrypted) copy of the message's symmetric key,
-    # so the recipient can unwrap it with their private key and then decrypt
-    # the ciphertext.  The server never sees the raw symmetric key.
+    # HPKE encapsulated key: the 32-byte ephemeral X25519 public key produced
+    # at encrypt time.  Not a wrapped symmetric key — the content key is
+    # re-derived by the recipient via the HPKE key schedule and never stored
+    # or transmitted in any form.
     encrypted_key: str | None = Field(
         default=None,
         description=(
-            "Base64-encoded message symmetric key encrypted with the "
-            "recipient's public key."
+            "Base64-encoded 32-byte HPKE encapsulated key (ephemeral X25519 "
+            "public key)."
         ),
     )
 
@@ -330,22 +304,25 @@ class MessageSend(BaseModel):
         return v
 
 
-class ForwardRequest(BaseModel):
-    """Body for POST /messages/{id}/forward."""
+class ShareRequest(BaseModel):
+    """Body for sharing/forwarding a file with a new recipient.
+
+    (Currently served by POST /messages/{id}/forward; renamed to
+    POST /files/{id}/share with the router rework.)
+    """
 
     recipient_username: str = Field(
         ...,
         min_length=1,
         max_length=64,
-        description="Username of the user to forward the message to.",
+        description="Username of the user to share the file with.",
     )
 
     # Re-encryption payload (preferred path).
-    # The forwarder decrypts the original message on their device, then
-    # re-encrypts the plaintext specifically for the new recipient using
-    # encryptMessage(plaintext, recipientPublicKey, forwarderPrivateKey).
-    # When all three fields are present the backend creates a brand-new
-    # Message row so the new recipient can actually decrypt it.
+    # The sharer decrypts the original file on their device, then re-encrypts
+    # the plaintext specifically for the new recipient.  When all three fields
+    # are present the backend creates a brand-new file row so the new
+    # recipient can actually decrypt it.
     new_ciphertext: str | None = Field(
         default=None,
         description="Re-encrypted ciphertext (base64, without nonce prepended).",
@@ -356,7 +333,7 @@ class ForwardRequest(BaseModel):
     )
     new_encrypted_key: str | None = Field(
         default=None,
-        description="Symmetric key wrapped with the new recipient's public key.",
+        description="HPKE encapsulated key for the new recipient (base64, 32 bytes).",
     )
 
     # Legacy field kept for backward compatibility.
@@ -367,22 +344,21 @@ class ForwardRequest(BaseModel):
 
 
 class RevokeRequest(BaseModel):
-    """Body for POST /messages/{id}/revoke — revoke message access."""
+    """Body for POST /files/{id}/revoke — revoke file access."""
 
     # If provided, revoke only this recipient's access (delete their
-    # message_access row).  If omitted, revoke for all recipients by
-    # soft-deleting the message entirely (is_deleted = True).
+    # file_access row).  If omitted, revoke for all recipients.
     recipient_username: str | None = Field(
         default=None,
         description=(
             "Target recipient username. If omitted, access is revoked for all "
-            "recipients (full soft-delete)."
+            "recipients (every access row is removed)."
         ),
     )
 
 
-class MessageListItem(BaseModel):
-    """One summary item in an inbox or sent-messages listing.
+class FileListItem(BaseModel):
+    """One summary item in a shared-with-me or owned-files listing.
 
     Does NOT include the ciphertext — that is only returned by the download
     endpoint.  This keeps the listing lightweight and prevents the server
@@ -392,18 +368,21 @@ class MessageListItem(BaseModel):
     id: int
     sender_id: int | None
     sender_username: str | None
-    recipient_username: str | None = None   # populated for sent listings; None for inbox
+    recipient_username: str | None = None   # populated for owned listings; None for shared
     subject: str | None
+    filename: str | None = None
+    content_type: str | None = None
+    size_bytes: int | None = None
     is_read: bool
     is_deleted: bool
-    is_forwarded: bool | None = None        # True for messages created by the forward endpoint
+    is_forwarded: bool | None = None        # True for files created by the share endpoint
     created_at: datetime
 
 
-class MessageDownloadResponse(BaseModel):
-    """Full message payload returned by GET /messages/{id}/download.
+class FileDownloadResponse(BaseModel):
+    """Full encrypted payload returned by the download endpoint.
 
-    Contains everything the recipient needs to decrypt the message:
+    Contains everything the recipient needs to decrypt the file:
       - ciphertext  — the stored blob (nonce prepended, base64)
       - nonce       — extracted from the blob for convenience
       - associated_data — the canonical AAD string; pass this to decrypt()
@@ -427,12 +406,15 @@ class MessageDownloadResponse(BaseModel):
     # Pass this verbatim as associated_data to your AEAD decrypt() call.
     associated_data: str
 
-    # The recipient's copy of the wrapped symmetric key.  Decrypt with your
-    # private key to recover the message_key, then use message_key + nonce +
-    # associated_data to decrypt the ciphertext.
+    # The recipient's copy of the HPKE encapsulated key (ephemeral public
+    # key).  Run decapsulation with your private key and the sender's public
+    # key to derive the content key and decrypt the ciphertext.
     encrypted_key: str | None
 
     subject: str | None
+    filename: str | None = None
+    content_type: str | None = None
+    size_bytes: int | None = None
     integrity_hash: str | None
     is_read: bool
     created_at: datetime

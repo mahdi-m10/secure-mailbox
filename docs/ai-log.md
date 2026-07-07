@@ -267,3 +267,104 @@ Design choices not explicitly specified in my direction:
 **Corrections / rejections:** none yet (pending review of this chunk).
 
 ---
+
+## Entry 6 — C++ client rework: file operations, live AAD, TOFU, key vault
+
+**What I asked for:**
+- Rename `Message`/`MessageStore` → `File`/`FileStore` consistent with the
+  pivot; move the client to the /files endpoints with file-manager verbs
+  (upload from a local path, download to a local path, list owned/shared,
+  share, revoke, delete).
+- Bind the canonical AAD at the C++ call sites — closing the enforcement gap
+  flagged in the AAD chunk, so enforcement is live in all shipped clients.
+- Implement TOFU pinning in the C++ client (local pin file, same trust model
+  and hard-block behaviour as the web client).
+- Fix the C++ private-key-at-rest gap: passphrase-encrypted persistent key
+  (Argon2id with salt/params distinct from server login hashing, per the
+  design document's remediation map) — and I required that there be NO
+  fallback path that operates with an unencrypted/unpersisted key: key
+  generation and key import must both go through vault creation.
+- Keep the C++ rubric visible: header/implementation separation, appropriate
+  classes, STL, smart pointers, const-correctness.
+
+**What was produced:**
+- New layout: `Crypto.{hpp,cpp}` (all cryptography moved out of main.cpp),
+  `KeyVault.{hpp,cpp}`, `PinStore.{hpp,cpp}`, `File.hpp` (header-only value
+  type), `FileStore.{hpp,cpp}`, reworked `Client.{hpp,cpp}`; `main.cpp` is
+  CLI flow only. Binary payloads (`std::vector<unsigned char>`) replace the
+  string-based API.
+- AAD live at all three C++ call sites (upload, download, share), rebuilt
+  locally on decrypt from response metadata + own username; no AAD-less
+  fallback. Verified end-to-end: relabelling a file's name directly in the
+  server database makes the C++ download fail the tag check.
+- TOFU: per-account `pins.json`; every peer-key fetch goes through one
+  chokepoint (`get_verified_peer_key`) — first use auto-pins with a notice,
+  mismatch prints both SHA-256 fingerprints (same grouped-hex format as the
+  web client) and refuses unless the user types `trust new key`, which
+  re-pins. A corrupt pin file aborts startup rather than silently resetting
+  trust.
+- KeyVault: `vault.json` (mode 0600) holding the private key wrapped with
+  XSalsa20-Poly1305 under an Argon2id-derived key (ARGON2ID13, opslimit 3,
+  memlimit 256 MiB, random 16-byte salt stored in the file). Login unlocks
+  it (3 attempts, then browse-only session). Generation and import both
+  require vault creation; the private key is never printed and there is no
+  in-memory-only key path. The vault's public key is cross-checked against
+  the server record after unlock.
+- Verification: clean build under `-Wall -Wextra -Wpedantic`; a compiled
+  harness against the real translation units (AAD format, HPKE round-trip +
+  wrong-AAD/no-AAD/wrong-sender rejection, vault create/unlock/wrong
+  passphrase/no clear-text key on disk, pin persistence); C++↔Python interop
+  with AAD in both directions plus relabelled-filename rejection both ways;
+  scripted end-to-end against a live backend: register→vault→upload→
+  download (byte-exact), share to a third user (byte-exact), TOFU tamper
+  test (refusal, then override), DB relabel rejected, wrong-passphrase
+  lockout, and the server's login rate limiter surfaced correctly. Backend
+  suite still 21/21.
+
+Design choices not explicitly specified in my direction:
+- **DECISION — vault wrap cipher is XSalsa20-Poly1305 (`crypto_secretbox`),
+  not AES-256-GCM.** Everything else in the system uses AES-256-GCM, so the
+  reason needs stating exactly: libsodium's AES-256-GCM refuses to run
+  without hardware AES support (AES-NI), because a software fallback would
+  be timing-attack-prone — the file-encryption path therefore checks
+  `crypto_aead_aes256gcm_is_available()` and disables itself on such CPUs.
+  If the vault also used AES-GCM, a user on a CPU without AES-NI could not
+  unlock their own key file at all. XSalsa20-Poly1305 is libsodium's
+  default secret-key AEAD, implemented in constant-time software on every
+  platform, so the vault always opens. Its 24-byte nonce is also large
+  enough to draw at random with negligible collision probability, whereas
+  GCM's 12-byte nonce is not — which is why the HPKE path derives its nonce
+  from the key schedule instead of randomising it. Security is equivalent
+  for this use: both are AEADs; the vault's real strength is the Argon2id
+  passphrase derivation either way.
+- **DECISION — vault KDF parameters** `crypto_pwhash_OPSLIMIT_MODERATE`/
+  `MEMLIMIT_MODERATE` (t=3, m=256 MiB): libsodium's recommended moderate
+  tier, deliberately distinct from the server's login hashing (t=3,
+  m=64 MiB, p=4). Parameters are stored in the vault file so they can be
+  raised later without breaking old vaults.
+- **DECISION — local state location** `~/.securemailbox/<username>/`
+  (`SECUREMAILBOX_HOME` overrides for tests); pins are per local account,
+  mirroring the web client's per-account IndexedDB pins.
+- **DECISION — key import recomputes the public key** from the private
+  scalar (X25519 base-point multiplication) instead of asking the user for
+  both halves — eliminates mismatched-pair mistakes.
+- **DECISION — owner cannot download-decrypt their own upload**: surfaced
+  as an explanatory message (HPKE derives the content key from the
+  recipient's key pair), matching the web client's behaviour; share is
+  therefore offered on received files.
+- **DECISION — `File::Fields` aggregate** passed to the constructor instead
+  of a 12-argument constructor; `File` is header-only.
+- Rubric notes: RAII `unique_ptr<CURL, CurlDeleter>`; `std::optional`
+  returns throughout; `sodium_memzero` on every secret intermediate and on
+  logout/exit; `std::filesystem` for state paths; STL `sort`/`copy_if`
+  views in `FileStore`; const-correct `noexcept` accessors.
+
+**Corrections / rejections:** I added the no-fallback key-handling
+requirement and required the vault-cipher rationale to be stated clearly
+enough to restate unaided; both were incorporated as specified. A stale
+schema docstring (`FileDownloadResponse.associated_data` still describing
+the old AAD format as "not bound into the AEAD") was corrected in the same
+chunk, along with the design-document sections (§3, §4.5, §7, §8, §9) that
+had fallen behind the implemented state.
+
+---

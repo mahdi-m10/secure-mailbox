@@ -1,10 +1,11 @@
 #pragma once
+#include <cstdint>
 #include <memory>
 #include <optional>
 #include <string>
 #include <vector>
 #include <curl/curl.h>
-#include "Message.hpp"
+#include "File.hpp"
 #include "User.hpp"
 
 struct ClientConfig {
@@ -13,7 +14,21 @@ struct ClientConfig {
     bool verify_ssl{true};
 };
 
-// HTTP client for the Secure Messenger backend API.
+// Everything needed for POST /files/upload except the recipient — the
+// ciphertext fields come from crypto::hpke_encapsulate(), the metadata from
+// the local file being uploaded.
+struct UploadPayload {
+    std::string                ciphertext_b64;
+    std::string                nonce_b64;
+    std::string                encrypted_key_b64;
+    std::string                associated_data;   // canonical AAD string (bound in the AEAD)
+    std::optional<std::string> filename;
+    std::optional<std::string> content_type;
+    std::optional<std::int64_t> size_bytes;       // plaintext size
+    std::optional<std::string> subject;
+};
+
+// HTTP client for the Secure Mailbox backend API.
 //
 // Manages a single libcurl handle via RAII (CurlHandle unique_ptr).
 // All public methods are synchronous; they block until the server responds.
@@ -30,7 +45,6 @@ public:
     Client& operator=(Client&&)      = default;
 
     // ── Authentication ────────────────────────────────────────────────────────
-    // Sends form-encoded credentials (OAuth2PasswordRequestForm).
     // Stores access_token and refresh_token on success.
     bool login(const std::string& username, const std::string& password);
     // POST /auth/logout — requires a prior successful login().
@@ -40,7 +54,7 @@ public:
                        const std::string& email,
                        const std::string& password);
 
-    bool        is_logged_in()  const noexcept { return !access_token_.empty(); }
+    bool               is_logged_in()  const noexcept { return !access_token_.empty(); }
     const std::string& logged_in_as() const noexcept { return username_; }
 
     // ── Key discovery (no auth required) ─────────────────────────────────────
@@ -50,19 +64,29 @@ public:
     // POST /users/keys — JWT required; uploads caller's X25519 public key.
     bool upload_public_key(const std::string& public_key_b64);
 
-    // ── Messages ──────────────────────────────────────────────────────────────
-    // POST /messages/send — ciphertext_b64 and nonce_b64 must already be
-    // encrypted by the caller; the server stores them opaquely.
-    bool send_message(const std::string& recipient_username,
-                      const std::string& ciphertext_b64,
-                      const std::string& nonce_b64,
-                      const std::optional<std::string>& subject          = std::nullopt,
-                      const std::optional<std::string>& encrypted_key_b64 = std::nullopt);
+    // ── Files ─────────────────────────────────────────────────────────────────
+    // POST /files/upload — payload fields must already be encrypted by the
+    // caller; the server stores them opaquely.  Returns the new file's id.
+    std::optional<int> upload_file(const std::string& recipient_username,
+                                   const UploadPayload& payload);
 
-    std::vector<Message>  get_inbox(int skip = 0, int limit = 50);
-    std::vector<Message>  get_sent (int skip = 0, int limit = 50);
-    std::optional<Message> download_message(int message_id);
-    bool                   delete_message  (int message_id);
+    std::vector<File>   get_shared(int skip = 0, int limit = 50);  // shared with me
+    std::vector<File>   get_owned (int skip = 0, int limit = 50);  // my uploads
+    std::optional<File> download_file(int file_id);
+    bool                delete_file  (int file_id);                // owner-only soft delete
+
+    // POST /files/{id}/share — re-encryption path: the sharer decrypted the
+    // file locally and re-encrypted it for the new recipient.
+    bool share_file(int file_id,
+                    const std::string& recipient_username,
+                    const std::string& new_ciphertext_b64,
+                    const std::string& new_nonce_b64,
+                    const std::string& new_encrypted_key_b64);
+
+    // POST /files/{id}/revoke — owner-only.  With a username: targeted
+    // revocation; without: removes every recipient's access.
+    bool revoke_access(int file_id,
+                       const std::optional<std::string>& recipient_username = std::nullopt);
 
 private:
     // RAII handle: curl_easy_cleanup is called automatically when the
@@ -83,6 +107,9 @@ private:
                          const std::string& path,
                          const std::string& body        = "",
                          bool               form_encoded = false);
+
+    // Fetch a paginated file listing (shared/owned) and parse it.
+    std::vector<File> get_file_listing(const std::string& endpoint, int skip, int limit);
 
     // Percent-encode a string for safe embedding in a URL path or query string.
     std::string url_encode(const std::string& value) const;

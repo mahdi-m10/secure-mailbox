@@ -432,10 +432,12 @@ class FileDownloadResponse(BaseModel):
     # the decoded ciphertext blob, re-encoded as base64.
     nonce: str
 
-    # Canonical context string computed by the server:
-    #   "v1:sender={owner_id}:recipient={recipient_id}:file={file_id}"
-    # Informational — not currently bound into the AEAD
-    # (see docs/crypto-design.md §7).
+    # Canonical context string rebuilt by the server from stored metadata:
+    #   "smx:v1:sender={username}:recipient={username}:filename={filename}"
+    # Informational for display/debugging only — clients MUST rebuild the AAD
+    # locally from owner_username/filename and their own username rather than
+    # trust this value, since a compromised server could return a string
+    # matching relabelled metadata (see docs/crypto-design.md §7).
     associated_data: str
 
     # The recipient's copy of the HPKE encapsulated key (ephemeral public

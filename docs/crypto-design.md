@@ -66,7 +66,7 @@ Four attacker classes, per the project brief. ✔ = property holds, ✘ = does n
 |---|---|---|---|---|
 | File confidentiality | ✔ | ✔ | ✔ | ✔ |
 | File integrity (tamper detection) | ✔ | ✔ | ✔ | ✔ |
-| Sender authenticity | ✔ | ✔ | ✔ | **✘ — see below** |
+| Sender authenticity | ✔ | ✔ | ✔ | **partial — TOFU-pinned pairs ✔, first contact ✘ (see below)** |
 | Metadata confidentiality | ✔ (TLS) | ✔ (TLS) | ✘ | ✘ |
 | Availability / delivery | ✔ | ✘ | ✔ | ✘ |
 | Replay / duplicate detection | ✔ (TLS) | ✔ (TLS) | ✘ | ✘ |
@@ -114,17 +114,23 @@ arbitrary responses.
 
 *Properties that do NOT survive (stated explicitly, per the brief):*
 
-1. **Sender authenticity via key substitution — current implementation gap.**
-   Mode_Auth authenticates *whoever holds the private key matching the public key
-   the recipient uses for `dh2`*. Clients currently fetch that public key from
-   the server **on every decrypt, with no local pinning**, so a compromised
-   server can register its own key pair under Alice's username and forge
-   "from Alice" files to Bob (and MitM new Alice→Bob uploads). The design
-   intends TOFU-with-pinning (trust the first key seen; warn on change —
-   Signal's safety-number model), and module docstrings describe it, but **no
-   client implements the pin today**. Until it is implemented (see §9),
-   sender authenticity holds only against attackers (a)–(c). This is the
-   single most significant known weakness of the current build.
+1. **Sender authenticity via key substitution — mitigated by TOFU pinning,
+   residual first-contact gap.** Mode_Auth authenticates *whoever holds the
+   private key matching the public key the recipient uses for `dh2`*; that
+   public key comes from the server's directory, so a compromised server can
+   register its own key pair under Alice's username. **Both clients now pin
+   peer keys on first use** (web: IndexedDB pin store per local account;
+   C++: per-account pin file) and compare the server-returned key against the
+   pin on *every* subsequent fetch — before encrypting to a recipient and
+   before decrypting from a sender. A mismatch hard-blocks the operation and
+   shows both SHA-256 fingerprints; proceeding requires an explicit user
+   override (which re-pins) — Signal's safety-number model. Consequence:
+   once a pair has communicated, the server cannot substitute keys
+   undetectably. What TOFU cannot fix: the **first** contact — a server that
+   substitutes a key before any pin exists still wins that pair, and a user
+   who blindly clicks through the override warning re-opens the hole.
+   Out-of-band fingerprint comparison (both clients display fingerprints) or
+   the proposed blockchain key registry would close first-contact trust.
 2. **Availability & completeness.** The server can drop, withhold, reorder, or
    duplicate files, or lie in listings. Asynchronous store-and-forward cannot
    prevent this; it can at best be made evident (out of scope here; the
@@ -251,9 +257,22 @@ exfiltration for offline use is blocked; in-session abuse is not. **It is not
 additionally encrypted under a password-derived key**, which the brief asks for.
 Stated as a limitation (§8.3); remediation planned (§9).
 
-**C++ client keys.** Not persisted at all: generated in memory, printed once
-for the user to save, zeroed with `sodium_memzero` on scheme use. This
-sidesteps rather than satisfies the key-at-rest requirement (§8.3).
+**C++ client keys.** Persisted in a passphrase-encrypted **key vault**
+(`~/.securemailbox/<username>/vault.json`, mode 0600). The private key is
+wrapped with XSalsa20-Poly1305 (`crypto_secretbox`) under a key derived from
+the user's passphrase with **Argon2id** (libsodium `crypto_pwhash`,
+ARGON2ID13, opslimit 3, memlimit 256 MiB, random 16-byte salt stored in the
+file) — parameters deliberately distinct from the server-side login hashing
+(m=64 MiB, t=3, p=4), as the brief requires. The wrap cipher is the one
+deliberate departure from AES-256-GCM in this system: libsodium's AES-GCM
+needs AES-NI hardware, so a GCM-wrapped vault would be unopenable on CPUs
+without it — locking the user out of their own key — whereas
+XSalsa20-Poly1305 is a pure-software AEAD that is available unconditionally,
+and its 24-byte nonce is safe to draw at random. A wrong passphrase fails
+the Poly1305 MAC (the vault cannot yield garbage key bytes). The key is
+never printed and never persisted unwrapped; generation and import both
+*require* vault creation — there is no in-memory-only key path. In-memory
+copies are zeroed with `sodium_memzero` on logout/exit.
 
 **Tokens.** Access JWT + refresh token in browser `localStorage`
 (XSS-readable — accepted risk, mitigated by CSP and short JWT expiry);
@@ -442,41 +461,52 @@ What the key schedule binds regardless of AAD: sender identity, recipient
 identity, and the specific encapsulation (`dh2` binds both static keys;
 `salt = pkE` binds the ephemeral) — no cross-pair replay, no re-attribution.
 
-**Status — mechanism vs. enforcement:** the AAD *mechanism* is implemented
-in all three stacks: each crypto layer authenticates whatever associated
-data is passed and fails closed on mismatch (verified by cross-stack tests).
-**Enforcement is not yet live in any shipped client** — every call site
-currently passes no AAD (parameters default to none, so pre-AAD ciphertexts
-remain decryptable). The web client call sites are wired in the web-client
-rework; the C++ CLI call sites in the C++ client rework (§9). Until each
-lands, files uploaded by that client carry no AAD and gain no relabelling
-protection; the server meanwhile computes the canonical form and validates
-it when a client supplies one.
+**Status — enforcement is live in both shipped clients.** Every encrypt and
+decrypt call site now binds the canonical AAD:
+
+- **Web client**: upload builds it from `(me, recipient, file.name)`;
+  download and share rebuild it locally from the response metadata plus the
+  client's own username.
+- **C++ client**: identical pattern at upload, download, and share
+  (re-encrypt) call sites.
+
+Neither client falls back to AAD-less decryption on failure — a retry
+without AAD would let a malicious server strip the relabelling protection
+(downgrade attack). Deliberate consequence: ciphertexts uploaded by the
+pre-AAD message clients are no longer decryptable in the current clients.
+Verified end-to-end: relabelling a stored file's filename directly in the
+server database causes both clients' downloads to fail the GCM tag check,
+and cross-stack tests (C++↔Python↔Web Crypto) accept matching AAD and
+reject a relabelled filename in every direction. The crypto-layer
+parameters still default to no AAD, so the primitives remain usable for
+legacy data in tests — but no shipped call site passes empty AAD.
 
 ---
 
 ## 8. Known limitations
 
-1. **Unpinned key directory ⇒ no sender authenticity under full server
-   compromise** (§3(d)1). Most significant gap; fix is client-side TOFU
-   pinning with fingerprint-change warnings. The proposed blockchain
-   key-registry component, if confirmed, would strengthen first-contact trust
-   beyond TOFU.
+1. **First-contact key trust** (§3(d)1). TOFU pinning is implemented in both
+   clients (pin on first use, hard-block with fingerprints on change,
+   explicit override re-pins), so key substitution against established pairs
+   is detected. The residual gap is inherent to TOFU: the very first fetch of
+   a peer's key is trusted unverified, and a user can click through the
+   mismatch warning. Mitigations: out-of-band fingerprint comparison (both
+   clients display SHA-256 fingerprints); the proposed blockchain
+   key-registry component, if confirmed, would strengthen first-contact
+   trust beyond TOFU.
 2. **No forward secrecy / no post-compromise security** (§3(d)5) — accepted
    for scope; would require a ratchet or per-session ephemeral–ephemeral
    exchange, which asynchronous offline delivery complicates.
-3. **Private keys at rest under-protected** (§4.5): web = non-extractable but
-   not password-wrapped (brief item 3c wants encryption under a user-secret-derived
-   key with KDF parameters distinct from server-side login hashing);
-   C++ = not persisted at all. Planned: Argon2id-derived key-wrap with its own
-   salt/params, independent of the server-side login parameters.
-4. **AAD adoption incomplete** (§7): the mechanism is implemented and
-   cross-verified in all three stacks, but **no shipped client binds real
-   values yet** — web call sites land with the web-client rework, C++ call
-   sites with the C++ client rework. Files uploaded until then carry no AAD
-   and remain relabel-able. Same-pair *duplication* (not relabelling)
-   remains possible regardless, since the file ID cannot be bound at
-   encrypt time.
+3. **Private key at rest — web client only** (§4.5): the C++ client now
+   satisfies the requirement (Argon2id-derived key-wrap vault with its own
+   salt and parameters, distinct from server-side login hashing). The web
+   client's key remains non-extractable but **not** password-wrapped, which
+   brief item 3c asks for; planned as its own chunk (§9).
+4. **AAD closes relabelling, not duplication** (§7): enforcement is live at
+   every call site in both shipped clients. Same-pair *duplication* remains
+   possible regardless, since the server-assigned file ID cannot be bound at
+   encrypt time. Ciphertexts from the pre-AAD message clients are no longer
+   decryptable in the current clients (deliberate — no downgrade fallback).
 5. **Metadata exposure** (§3(c)): social graph, timing, sizes, and plaintext
    subject/filename are visible to the server. Filenames could be
    client-side-encrypted later; traffic analysis is out of scope.
@@ -509,9 +539,9 @@ it when a client supplies one.
 
 | Gap | Fix | When |
 |---|---|---|
-| §8.1 key pinning | TOFU pin store in each client (IndexedDB / local file), hard warning on fingerprint change | Client UI chunks of the mailbox pivot |
-| §8.4 AAD | Mechanism + canonical format **done** in all three stacks (username/filename-based; file ID excluded — unbindable pre-upload). Remaining: call sites — web client binds on upload/download in the web rework; C++ CLI binds in the C++ rework | Web rework chunk, then C++ chunk |
-| §8.3 key-at-rest | Argon2id(passphrase, dedicated salt/params) → AES-256-GCM key-wrap of `sk`; C++ client gains encrypted key file | Dedicated chunk (planned #7) |
+| §8.1 key pinning | **Done — both clients.** TOFU pin store (web: IndexedDB; C++: per-account pin file), hard block + fingerprint display on change, explicit override re-pins. Residual: first-contact trust (inherent to TOFU; blockchain registry would strengthen) | Web + C++ rework chunks (landed) |
+| §8.4 AAD | **Done — enforcement live at every call site in both clients** (canonical username/filename form; file ID excluded — unbindable pre-upload; no AAD-less fallback). Residual: same-pair duplication | Web + C++ rework chunks (landed) |
+| §8.3 key-at-rest | **C++ done**: Argon2id(passphrase, dedicated salt/params) → XSalsa20-Poly1305 key-wrap vault (secretbox chosen over AES-GCM so the vault opens without AES-NI). **Web remaining**: passphrase wrap of the IndexedDB key | Dedicated chunk (planned #7, web) |
 | §8.6 upload cap | Enforced max upload size + documented limit | Files-router chunk |
 
 ---

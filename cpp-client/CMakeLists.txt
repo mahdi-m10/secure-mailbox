@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
-project(SecureMessengerClient LANGUAGES CXX)
+project(SecureMailboxClient LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -17,28 +17,30 @@ find_package(nlohmann_json REQUIRED)
 
 # ── Executable ────────────────────────────────────────────────────────────────
 
-add_executable(secure_messenger
+add_executable(secure_mailbox
     src/main.cpp
+    src/Crypto.cpp
+    src/KeyVault.cpp
+    src/PinStore.cpp
     src/User.cpp
-    src/Message.cpp
     src/Client.cpp
-    src/MessageStore.cpp
+    src/FileStore.cpp
 )
 
-target_include_directories(secure_messenger
+target_include_directories(secure_mailbox
     PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/include
         ${SODIUM_INCLUDE_DIRS}
 )
 
-target_link_libraries(secure_messenger
+target_link_libraries(secure_mailbox
     PRIVATE
         CURL::libcurl
         ${SODIUM_LIBRARIES}
         nlohmann_json::nlohmann_json
 )
 
-target_compile_options(secure_messenger
+target_compile_options(secure_mailbox
     PRIVATE
         -Wall
         -Wextra

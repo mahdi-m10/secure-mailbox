@@ -91,6 +91,9 @@ cmake_install.cmake
 *.p12
 *.pfx
 
+# ── Local revision notes (never push) ────────────────────────
+docs/interview-prep.md
+
 # ── Python tooling ────────────────────────────────────────────
 .ruff_cache/
 

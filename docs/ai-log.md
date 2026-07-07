@@ -169,6 +169,11 @@ Design choices not explicitly specified in my direction:
   on a relabelled filename in both directions (C++ client compiled and
   exercised via a test harness). Web Crypto path not executable outside a
   browser; exercised when the web client is reworked.
+- Precision on scope: this chunk delivers the AAD *mechanism* in all three
+  stacks — enforcement is NOT yet live in any shipped client, because every
+  call site still passes no AAD. The web client call sites bind real values
+  in the web-client rework; the C++ CLI call sites in the C++ client rework.
+  Until each lands, that client's uploads carry no AAD.
 - Design document §7/§8/§9 updated to the new state.
 
 Design choices not explicitly specified in my direction:
@@ -182,9 +187,10 @@ Design choices not explicitly specified in my direction:
   (server-validated charset) and filename is the final field, making the
   canonical string unambiguous without escaping.
 - **DECISION — optional parameters, callers wired later:** AAD params default
-  to none so the change is non-breaking; the client call sites bind AAD when
-  they are reworked for the /files API (they are already incompatible with
-  the new paths, so binding activates with that rework).
+  to none so the change is non-breaking; call sites bind real values
+  per-client as each is reworked for the /files API (web client first, C++
+  CLI after) — both were already incompatible with the new paths, so binding
+  activates with those reworks rather than silently changing behaviour here.
 - **DECISION — server-side upload cross-check:** validating client-supplied
   `associated_data` against the canonical form is a debugging aid to catch
   construction bugs at upload time; the enforcement point remains the

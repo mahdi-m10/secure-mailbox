@@ -442,11 +442,16 @@ What the key schedule binds regardless of AAD: sender identity, recipient
 identity, and the specific encapsulation (`dh2` binds both static keys;
 `salt = pkE` binds the ephemeral) — no cross-pair replay, no re-attribution.
 
-**Status:** all three crypto layers accept and enforce AAD (optional
-parameter, default none, so pre-AAD ciphertexts remain decryptable); the
-server computes/validates the canonical form. The web and C++ *client call
-sites* bind it as part of the client rework (§9) — ciphertexts uploaded by
-the old clients carry no AAD.
+**Status — mechanism vs. enforcement:** the AAD *mechanism* is implemented
+in all three stacks: each crypto layer authenticates whatever associated
+data is passed and fails closed on mismatch (verified by cross-stack tests).
+**Enforcement is not yet live in any shipped client** — every call site
+currently passes no AAD (parameters default to none, so pre-AAD ciphertexts
+remain decryptable). The web client call sites are wired in the web-client
+rework; the C++ CLI call sites in the C++ client rework (§9). Until each
+lands, files uploaded by that client carry no AAD and gain no relabelling
+protection; the server meanwhile computes the canonical form and validates
+it when a client supplies one.
 
 ---
 
@@ -465,12 +470,13 @@ the old clients carry no AAD.
    key with KDF parameters distinct from server-side login hashing);
    C++ = not persisted at all. Planned: Argon2id-derived key-wrap with its own
    salt/params, independent of the server-side login parameters.
-4. **AAD adoption incomplete** (§7): the crypto layers enforce AAD and the
-   canonical format is live server-side, but the web/C++ client call sites
-   bind it only from the client rework onward — files uploaded by the old
-   clients carry no AAD and remain relabel-able. Same-pair *duplication*
-   (not relabelling) remains possible regardless, since the file ID cannot
-   be bound at encrypt time.
+4. **AAD adoption incomplete** (§7): the mechanism is implemented and
+   cross-verified in all three stacks, but **no shipped client binds real
+   values yet** — web call sites land with the web-client rework, C++ call
+   sites with the C++ client rework. Files uploaded until then carry no AAD
+   and remain relabel-able. Same-pair *duplication* (not relabelling)
+   remains possible regardless, since the file ID cannot be bound at
+   encrypt time.
 5. **Metadata exposure** (§3(c)): social graph, timing, sizes, and plaintext
    subject/filename are visible to the server. Filenames could be
    client-side-encrypted later; traffic analysis is out of scope.
@@ -504,7 +510,7 @@ the old clients carry no AAD.
 | Gap | Fix | When |
 |---|---|---|
 | §8.1 key pinning | TOFU pin store in each client (IndexedDB / local file), hard warning on fingerprint change | Client UI chunks of the mailbox pivot |
-| §8.4 AAD | ~~Crypto layers + canonical format~~ **done** (username/filename-based; file ID excluded — unbindable pre-upload). Remaining: client call sites bind AAD on upload/download | Client rework chunks |
+| §8.4 AAD | Mechanism + canonical format **done** in all three stacks (username/filename-based; file ID excluded — unbindable pre-upload). Remaining: call sites — web client binds on upload/download in the web rework; C++ CLI binds in the C++ rework | Web rework chunk, then C++ chunk |
 | §8.3 key-at-rest | Argon2id(passphrase, dedicated salt/params) → AES-256-GCM key-wrap of `sk`; C++ client gains encrypted key file | Dedicated chunk (planned #7) |
 | §8.6 upload cap | Enforced max upload size + documented limit | Files-router chunk |
 

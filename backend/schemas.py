@@ -196,12 +196,25 @@ class PasswordChange(BaseModel):
 # File operation schemas
 # ===========================================================================
 
-class FileUpload(BaseModel):
-    """Body for uploading an encrypted file to a recipient's mailbox.
+# ---------------------------------------------------------------------------
+# Upload size cap.
+#
+# Uploads are JSON with base64 payloads (deliberate simplicity trade-off;
+# limits documented in docs/crypto-design.md §8.6).  The cap below allows
+# ~8 MiB of plaintext:
+#
+#   ciphertext bytes = plaintext + 16 (GCM tag) = 8 MiB + 16 B
+#   base64 chars     = 4 * ceil(bytes / 3)      ≈ 11 185 000
+#
+# Rounded up slightly for encoding slack.  A second, coarser limit on the
+# whole request body (MAX_REQUEST_BODY_BYTES in main.py) rejects oversize
+# requests before JSON parsing.
+# ---------------------------------------------------------------------------
+MAX_CIPHERTEXT_B64_LEN: int = 11_500_000
 
-    (Currently served by POST /messages/send; the endpoint rename to
-    POST /files/upload lands with the router rework.)
-    """
+
+class FileUpload(BaseModel):
+    """Body for POST /files/upload — upload an encrypted file for a recipient."""
 
     recipient_username: str = Field(
         ...,
@@ -289,7 +302,14 @@ class FileUpload(BaseModel):
 
     @field_validator("ciphertext")
     @classmethod
-    def _ciphertext_must_contain_tag(cls, v: str) -> str:
+    def _ciphertext_size_and_tag(cls, v: str) -> str:
+        # Length check FIRST — before base64-decoding — so an oversize upload
+        # is rejected without materialising a second multi-MB buffer.
+        if len(v) > MAX_CIPHERTEXT_B64_LEN:
+            raise ValueError(
+                f"ciphertext exceeds the upload limit "
+                f"({MAX_CIPHERTEXT_B64_LEN} base64 chars ≈ 8 MiB plaintext)."
+            )
         try:
             raw = base64.b64decode(v, validate=True)
         except Exception:
@@ -305,11 +325,7 @@ class FileUpload(BaseModel):
 
 
 class ShareRequest(BaseModel):
-    """Body for sharing/forwarding a file with a new recipient.
-
-    (Currently served by POST /messages/{id}/forward; renamed to
-    POST /files/{id}/share with the router rework.)
-    """
+    """Body for POST /files/{id}/share — share a file with a new recipient."""
 
     recipient_username: str = Field(
         ...,
@@ -342,6 +358,18 @@ class ShareRequest(BaseModel):
         description="Deprecated: wrapped key for shared-access forwarding.",
     )
 
+    @field_validator("new_ciphertext")
+    @classmethod
+    def _new_ciphertext_within_cap(cls, v: str | None) -> str | None:
+        # Same upload cap as FileUpload.ciphertext — a share re-encrypts the
+        # whole file, so it must obey the same size limit.
+        if v is not None and len(v) > MAX_CIPHERTEXT_B64_LEN:
+            raise ValueError(
+                f"new_ciphertext exceeds the upload limit "
+                f"({MAX_CIPHERTEXT_B64_LEN} base64 chars ≈ 8 MiB plaintext)."
+            )
+        return v
+
 
 class RevokeRequest(BaseModel):
     """Body for POST /files/{id}/revoke — revoke file access."""
@@ -366,8 +394,8 @@ class FileListItem(BaseModel):
     """
 
     id: int
-    sender_id: int | None
-    sender_username: str | None
+    owner_id: int | None
+    owner_username: str | None
     recipient_username: str | None = None   # populated for owned listings; None for shared
     subject: str | None
     filename: str | None = None
@@ -380,18 +408,18 @@ class FileListItem(BaseModel):
 
 
 class FileDownloadResponse(BaseModel):
-    """Full encrypted payload returned by the download endpoint.
+    """Full encrypted payload returned by GET /files/{id}/download.
 
     Contains everything the recipient needs to decrypt the file:
       - ciphertext  — the stored blob (nonce prepended, base64)
       - nonce       — extracted from the blob for convenience
-      - associated_data — the canonical AAD string; pass this to decrypt()
-      - encrypted_key   — the recipient's wrapped symmetric key
+      - associated_data — the canonical context string (informational)
+      - encrypted_key   — the recipient's HPKE encapsulated key
     """
 
     id: int
-    sender_id: int | None
-    sender_username: str | None
+    owner_id: int | None
+    owner_username: str | None
 
     # The combined stored blob: base64(nonce_bytes ‖ ciphertext_with_tag).
     # The first 12 decoded bytes are the nonce; the rest is the ciphertext.
@@ -401,9 +429,10 @@ class FileDownloadResponse(BaseModel):
     # the decoded ciphertext blob, re-encoded as base64.
     nonce: str
 
-    # Canonical AAD string computed by the server:
-    #   "v1:sender={sender_id}:recipient={recipient_id}:msg={message_id}"
-    # Pass this verbatim as associated_data to your AEAD decrypt() call.
+    # Canonical context string computed by the server:
+    #   "v1:sender={owner_id}:recipient={recipient_id}:file={file_id}"
+    # Informational — not currently bound into the AEAD
+    # (see docs/crypto-design.md §7).
     associated_data: str
 
     # The recipient's copy of the HPKE encapsulated key (ephemeral public

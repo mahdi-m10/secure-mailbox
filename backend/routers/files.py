@@ -1,56 +1,65 @@
 """
-backend/routers/messages.py — Encrypted message endpoints.
+backend/routers/files.py — Encrypted file (mailbox) endpoints.
 
 Routes
 ------
-  POST   /messages/send          — send an encrypted message to a recipient
-  GET    /messages/inbox         — list received messages (no ciphertext)
-  GET    /messages/sent          — list sent messages (no ciphertext)
-  DELETE /messages/{id}          — soft-delete a sent message (sender only)
-  POST   /messages/{id}/forward  — grant access to a new recipient
-  POST   /messages/{id}/revoke   — revoke one or all recipients' access
-  GET    /messages/{id}/download — retrieve the full ciphertext for decryption
+  POST   /files/upload           — encrypt-and-upload a file for a recipient
+  GET    /files/shared           — list files shared with me (no ciphertext)
+  GET    /files/owned            — list files I uploaded (no ciphertext)
+  DELETE /files/{id}             — soft-delete an uploaded file (owner only)
+  POST   /files/{id}/share       — share a file with a new recipient
+  POST   /files/{id}/revoke      — revoke one or all recipients' access
+  GET    /files/{id}/download    — retrieve the full ciphertext for decryption
+  GET    /files/{id}/blockchain-proof — on-chain integrity proof
 
 Access control model
 --------------------
 Every endpoint requires a valid JWT access token (get_current_user dependency).
 Beyond authentication, each endpoint enforces one of two ownership rules:
 
-  Sender-only operations (delete, revoke):
-    message.sender_id == current_user.id
-    → 403 Forbidden if the requester is not the sender.
+  Owner-only operations (delete, revoke):
+    file.owner_id == current_user.id
+    → 403 Forbidden if the requester is not the owner.
 
-  Read operations (download, forward):
+  Read operations (download, share):
     A row must exist in file_access where recipient_id == current_user.id
-    OR the requester is the original sender.
+    OR the requester is the owner.
     → 404 Not Found if neither condition holds.
-      (404 rather than 403: returning 403 would confirm the message exists
+      (404 rather than 403: returning 403 would confirm the file exists
        to an unauthorised requester — an IDOR information leak.)
 
 Storage layout
 --------------
 The nonce is NOT stored in a separate column.  The server stores the combined
-blob base64(nonce_bytes ‖ ciphertext_with_tag) in messages.ciphertext.
+blob base64(nonce_bytes ‖ ciphertext_with_tag) in files.ciphertext.
 The nonce is always the first 12 decoded bytes; the rest is the ciphertext.
 The download endpoint splits them and returns each as a named field so
 clients do not need to know the internal storage format.
 
 Canonical associated data (AAD)
 --------------------------------
-The server defines the canonical AAD for every message:
+The server computes a canonical context string for every file:
 
-    "v1:sender={sender_id}:recipient={recipient_id}:msg={message_id}"
+    "v1:sender={owner_id}:recipient={recipient_id}:file={file_id}"
 
-Clients MUST use this exact string when calling encrypt().  The server
-computes it from metadata on every download and returns it in the response
-so clients know exactly what to pass to decrypt().
+and returns it in the download response.  NOTE: no client currently binds
+this string into the AEAD — context binding today comes from the HPKE key
+schedule only (see docs/crypto-design.md §7).  Binding it for real is a
+planned change tracked in the design document's remediation map.
+
+Upload size limits
+------------------
+Uploads are JSON with base64 payloads (a deliberate simplicity trade-off —
+see docs/crypto-design.md §8.6).  Two layers of enforcement:
+  - schemas.FileUpload caps the base64 ciphertext at ~8 MiB of plaintext
+  - main.py rejects any request body over MAX_REQUEST_BODY_BYTES with 413
 
 Blockchain audit chain
 ----------------------
-Every sent message appends a BlockchainRecord that chains a hash of the
-message to the previous record's hash.  This provides tamper-evidence for
-the message log.  The chain is append-only; soft-delete sets is_deleted but
-never removes the BlockchainRecord (enforced by the RESTRICT FK constraint).
+Every upload appends a BlockchainRecord that chains a hash of the file to
+the previous record's hash.  This provides tamper-evidence for the mailbox
+log.  The chain is append-only; soft-delete sets is_deleted but never
+removes the BlockchainRecord (enforced by the RESTRICT FK constraint).
 """
 
 import base64
@@ -75,7 +84,7 @@ from backend.schemas import (
     ShareRequest,
 )
 
-router = APIRouter(prefix="/messages", tags=["messages"])
+router = APIRouter(prefix="/files", tags=["files"])
 
 
 # ---------------------------------------------------------------------------
@@ -115,42 +124,38 @@ def _unpack(stored_b64: str) -> tuple[str, str]:
 # Canonical associated data
 # ---------------------------------------------------------------------------
 
-def _canonical_aad(sender_id: int | None, recipient_id: int, message_id: int) -> str:
-    """Return the canonical AAD string for a given (sender, recipient, message).
+def _canonical_aad(owner_id: int | None, recipient_id: int, file_id: int) -> str:
+    """Return the canonical context string for a (owner, recipient, file) triple.
 
-    Both the sender (at encrypt time) and the recipient (at decrypt time) must
-    use this exact string.  Binding the AAD to sender_id, recipient_id, and
-    message_id means:
-      - A ciphertext cannot be replayed in a different conversation.
-      - A message forwarded to a new recipient requires re-encryption with
-        the new recipient's ID in the AAD (or the forward creates a new
-        message row — our implementation creates a new file_access row
-        without changing the ciphertext, so the download endpoint returns
-        the AAD for the original recipient pair).
+    "sender"/"recipient" name the cryptographic roles: the owner encrypted
+    the file (HPKE sender), the recipient decrypts it.
+
+    Informational for now — not bound into any AEAD call (see the module
+    docstring and docs/crypto-design.md §7).
     """
-    return f"v1:sender={sender_id}:recipient={recipient_id}:msg={message_id}"
+    return f"v1:sender={owner_id}:recipient={recipient_id}:file={file_id}"
 
 
 # ---------------------------------------------------------------------------
 # Blockchain helpers
 # ---------------------------------------------------------------------------
 
-def _append_blockchain_record(message: models.FileObject, db: Session) -> None:
-    """Append a new BlockchainRecord chaining *message* to the audit log.
+def _append_blockchain_record(file_obj: models.FileObject, db: Session) -> None:
+    """Append a new BlockchainRecord chaining *file_obj* to the audit log.
 
     Each record stores:
-      message_hash  — SHA-256 of (ciphertext + sender_id + created_at)
+      message_hash  — SHA-256 of (ciphertext + owner_id + created_at)
       previous_hash — block_hash of the most recent existing record,
                       or "0" * 64 for the genesis block
       block_hash    — SHA-256(previous_hash + message_hash)
       block_index   — 1-based sequence number in the chain
 
-    Note: this implementation is not atomic under concurrent sends (two
-    simultaneous sends could both read the same previous record and create
+    Note: this implementation is not atomic under concurrent uploads (two
+    simultaneous uploads could both read the same previous record and create
     the same block_index).  For a production system, use a DB-level sequence
     or a serialised writer.  For this project the risk is acceptable.
     """
-    content = f"{message.ciphertext}{message.sender_id}{message.created_at.isoformat()}"
+    content = f"{file_obj.ciphertext}{file_obj.owner_id}{file_obj.created_at.isoformat()}"
     message_hash = hashlib.sha256(content.encode()).hexdigest()
 
     last = db.scalars(
@@ -166,7 +171,7 @@ def _append_blockchain_record(message: models.FileObject, db: Session) -> None:
     ).hexdigest()
 
     db.add(models.BlockchainRecord(
-        file_id=message.id,
+        file_id=file_obj.id,
         message_hash=message_hash,
         previous_hash=previous_hash,
         block_hash=block_hash,
@@ -174,15 +179,15 @@ def _append_blockchain_record(message: models.FileObject, db: Session) -> None:
     ))
 
 
-def _submit_to_chain(message_id: int, integrity_hash: str) -> None:
+def _submit_to_chain(file_id: int, integrity_hash: str) -> None:
     """Anchor integrity_hash on Sepolia and persist the tx hash in BlockchainRecord.
 
     Runs in a daemon thread so the HTTP response is not delayed.
 
     Duplicate-hash behaviour
     ------------------------
-    In production every message has a unique hash because the ciphertext
-    embeds a random 12-byte nonce chosen at encrypt time — two messages with
+    In production every file has a unique hash because the ciphertext
+    embeds a random 12-byte nonce chosen at encrypt time — two files with
     the same plaintext therefore produce different hashes.  Duplicate hash
     reverts only occur in testing when the same plaintext and nonce are
     reused.  When a revert is detected this function calls
@@ -197,13 +202,13 @@ def _submit_to_chain(message_id: int, integrity_hash: str) -> None:
     logger = logging.getLogger(__name__)
 
     if not integrity_hash:
-        logger.warning("msg %d: integrity_hash is empty — skipping chain submission", message_id)
+        logger.warning("file %d: integrity_hash is empty — skipping chain submission", file_id)
         return
 
     if len(integrity_hash) != 64:
         logger.error(
-            "msg %d: integrity_hash is %d chars (expected 64) — skipping; value: %r",
-            message_id, len(integrity_hash), integrity_hash,
+            "file %d: integrity_hash is %d chars (expected 64) — skipping; value: %r",
+            file_id, len(integrity_hash), integrity_hash,
         )
         return
 
@@ -211,12 +216,12 @@ def _submit_to_chain(message_id: int, integrity_hash: str) -> None:
 
     try:
         eth_tx = record_message_digest(f"0x{integrity_hash}")
-        logger.info("msg %d anchored on Sepolia: %s", message_id, eth_tx)
+        logger.info("file %d anchored on Sepolia: %s", file_id, eth_tx)
 
     except EnvironmentError as exc:
         # Missing SEPOLIA_RPC_URL, CONTRACT_ADDRESS, or DEPLOYER_PRIVATE_KEY.
         # No point querying the chain without credentials.
-        logger.error("msg %d: blockchain env vars not configured: %r", message_id, exc)
+        logger.error("file %d: blockchain env vars not configured: %r", file_id, exc)
         return
 
     except (ValueError, RuntimeError) as exc:
@@ -230,33 +235,33 @@ def _submit_to_chain(message_id: int, integrity_hash: str) -> None:
                 proof = verify_hash_on_chain(f"0x{integrity_hash}")
             except Exception as ve:
                 logger.error(
-                    "msg %d: contract rejected submission and on-chain check failed — "
+                    "file %d: contract rejected submission and on-chain check failed — "
                     "original=%r  verify_error=%r",
-                    message_id, exc, ve,
+                    file_id, exc, ve,
                 )
                 return
 
             if proof.get("exists"):
                 logger.warning(
-                    "msg %d: hash already recorded on-chain at contract index %s "
+                    "file %d: hash already recorded on-chain at contract index %s "
                     "(duplicate content — expected during testing, not in production "
-                    "because each message embeds a unique random nonce)",
-                    message_id, proof.get("index"),
+                    "because each file embeds a unique random nonce)",
+                    file_id, proof.get("index"),
                 )
                 eth_tx = "duplicate"
             else:
                 logger.error(
-                    "msg %d: contract reverted but hash is not on-chain — "
+                    "file %d: contract reverted but hash is not on-chain — "
                     "possible gas issue or unexpected contract state: %r",
-                    message_id, exc,
+                    file_id, exc,
                 )
                 return
         else:
-            logger.error("msg %d: failed to anchor on Sepolia: %r", message_id, exc)
+            logger.error("file %d: failed to anchor on Sepolia: %r", file_id, exc)
             return
 
     except Exception as exc:
-        logger.error("msg %d: unexpected error anchoring on Sepolia: %r", message_id, exc)
+        logger.error("file %d: unexpected error anchoring on Sepolia: %r", file_id, exc)
         return
 
     # Persist eth_tx_hash ("0x..." or "duplicate") into the BlockchainRecord row.
@@ -266,86 +271,60 @@ def _submit_to_chain(message_id: int, integrity_hash: str) -> None:
         with SessionLocal() as db:
             rec = db.scalars(
                 select(models.BlockchainRecord).where(
-                    models.BlockchainRecord.file_id == message_id
+                    models.BlockchainRecord.file_id == file_id
                 )
             ).first()
             if rec:
                 rec.eth_tx_hash = eth_tx
                 db.commit()
             else:
-                logger.warning("msg %d: BlockchainRecord not found", message_id)
+                logger.warning("file %d: BlockchainRecord not found", file_id)
     except Exception as exc:
-        logger.error("msg %d: failed to persist eth_tx_hash=%r: %r", message_id, eth_tx, exc)
+        logger.error("file %d: failed to persist eth_tx_hash=%r: %r", file_id, eth_tx, exc)
 
 
 # ---------------------------------------------------------------------------
 # Access-control helpers
 # ---------------------------------------------------------------------------
 
-def _load_active_message(message_id: int, db: Session) -> models.FileObject:
-    """Return the Message row or raise 404.
+def _load_active_file(file_id: int, db: Session) -> models.FileObject:
+    """Return the FileObject row or raise 404.
 
-    Raises 404 (not 403) regardless of whether the message exists but is
-    deleted — revealing that a message *was* deleted would confirm its
+    Raises 404 (not 403) regardless of whether the file exists but is
+    deleted — revealing that a file *was* deleted would confirm its
     prior existence to an unauthorised requester.
     """
-    msg = db.get(models.FileObject, message_id)
-    if msg is None or msg.is_deleted:
+    file_obj = db.get(models.FileObject, file_id)
+    if file_obj is None or file_obj.is_deleted:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND,
-                            detail="Message not found.")
-    return msg
+                            detail="File not found.")
+    return file_obj
 
 
-def _require_sender(message: models.FileObject, current_user: models.User) -> None:
-    """Raise 403 if *current_user* is not the sender of *message*.
+def _require_owner(file_obj: models.FileObject, current_user: models.User) -> None:
+    """Raise 403 if *current_user* is not the owner of *file_obj*.
 
     403 (not 404) is appropriate here: by the time this is called the caller
-    has already been shown the message exists (they are either the sender or
-    a recipient who retrieved the message ID via inbox).  Confirming existence
-    to someone with partial access is not an additional information leak.
+    has already been shown the file exists (they are either the owner or
+    a recipient who retrieved the file ID via a listing).  Confirming
+    existence to someone with partial access is not an additional
+    information leak.
     """
-    if message.sender_id != current_user.id:
+    if file_obj.owner_id != current_user.id:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN,
-                            detail="Only the sender may perform this action.")
+                            detail="Only the owner may perform this action.")
 
 
 def _get_access_record(
-    message_id: int, user_id: int, db: Session
+    file_id: int, user_id: int, db: Session
 ) -> models.FileAccess | None:
-    """Return the FileAccess row for (message_id, user_id), or None."""
+    """Return the FileAccess row for (file_id, user_id), or None."""
     return db.scalars(
         select(models.FileAccess).where(
-            models.FileAccess.file_id == message_id,
+            models.FileAccess.file_id == file_id,
             models.FileAccess.recipient_id == user_id,
         )
     ).first()
-
-
-def _require_read_access(
-    message: models.FileObject,
-    current_user: models.User,
-    db: Session,
-) -> models.FileAccess | None:
-    """Verify current_user may read *message*; return their access record.
-
-    Allowed if:
-      - current_user is the sender, OR
-      - a FileAccess row exists for current_user as recipient.
-
-    Returns the FileAccess row (or None if the sender is reading their own
-    message — senders have no recipient row).
-
-    Raises 404 (not 403) on failure to prevent IDOR: returning 403 would
-    confirm the message exists to someone who has no access to it.
-    """
-    if message.sender_id == current_user.id:
-        return None   # sender always has access; no FileAccess row for them
-
-    access = _get_access_record(message.id, current_user.id, db)
-    if access is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND,
-                            detail="Message not found.")
-    return access
 
 
 def _lookup_active_user(username: str, db: Session) -> models.User:
@@ -363,26 +342,27 @@ def _lookup_active_user(username: str, db: Session) -> models.User:
 
 
 # ---------------------------------------------------------------------------
-# POST /messages/send
+# POST /files/upload
 # ---------------------------------------------------------------------------
 
 @router.post(
-    "/send",
+    "/upload",
     response_model=FileListItem,
     status_code=status.HTTP_201_CREATED,
-    summary="Send an encrypted message",
+    summary="Upload an encrypted file for a recipient",
     responses={
-        400: {"description": "Cannot send to yourself / invalid encoding"},
+        400: {"description": "Cannot upload to yourself / invalid encoding"},
         404: {"description": "Recipient not found"},
-        422: {"description": "Schema validation failure (bad nonce length etc.)"},
+        413: {"description": "Request body exceeds the upload size limit"},
+        422: {"description": "Schema validation failure (bad nonce length, oversize ciphertext, etc.)"},
     },
 )
-def send_message(
+def upload_file(
     body: FileUpload,
     current_user: models.User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> dict:
-    """Send an encrypted message to *recipient_username*.
+    """Upload an encrypted file addressed to *recipient_username*.
 
     The server stores the encrypted payload opaquely — it never decrypts the
     ciphertext and never has access to plaintext.
@@ -399,13 +379,14 @@ def send_message(
     if recipient.id == current_user.id:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="You cannot send a message to yourself.",
+            detail="You cannot upload a file to yourself.",
         )
 
     # ------------------------------------------------------------------
     # 2. Pack nonce ‖ ciphertext into the single stored blob.
     #    The Pydantic validators on FileUpload already confirmed both are
-    #    valid base64 and the nonce decodes to exactly 12 bytes.
+    #    valid base64, the nonce decodes to exactly 12 bytes, and the
+    #    ciphertext is within the upload size cap.
     # ------------------------------------------------------------------
     stored_blob = _pack(body.nonce, body.ciphertext)
 
@@ -420,15 +401,15 @@ def send_message(
     integrity = bytes(Web3.keccak(text=stored_blob)).hex()
 
     # ------------------------------------------------------------------
-    # 4. Persist the message row.
-    #    sender_id is set server-side from the verified JWT — the client
-    #    cannot claim to be a different sender (mass-assignment prevention).
+    # 4. Persist the file row.
+    #    owner_id is set server-side from the verified JWT — the client
+    #    cannot claim to be a different owner (mass-assignment prevention).
     #    db.flush() allocates the auto-increment ID without committing so
     #    the blockchain record and access row can reference it in the same
     #    transaction.
     # ------------------------------------------------------------------
-    message = models.FileObject(
-        sender_id=current_user.id,
+    file_obj = models.FileObject(
+        owner_id=current_user.id,
         ciphertext=stored_blob,
         subject=body.subject,
         filename=body.filename,
@@ -436,14 +417,14 @@ def send_message(
         size_bytes=body.size_bytes,
         integrity_hash=integrity,
     )
-    db.add(message)
-    db.flush()   # populates message.id and message.created_at
+    db.add(file_obj)
+    db.flush()   # populates file_obj.id and file_obj.created_at
 
     # ------------------------------------------------------------------
     # 5. Create the recipient's access record.
     # ------------------------------------------------------------------
     db.add(models.FileAccess(
-        file_id=message.id,
+        file_id=file_obj.id,
         recipient_id=recipient.id,
         encrypted_key=body.encrypted_key,
     ))
@@ -451,59 +432,59 @@ def send_message(
     # ------------------------------------------------------------------
     # 6. Append a blockchain audit record.
     # ------------------------------------------------------------------
-    _append_blockchain_record(message, db)
+    _append_blockchain_record(file_obj, db)
 
     db.commit()
-    db.refresh(message)
+    db.refresh(file_obj)
 
     # Anchor the integrity hash on Sepolia in the background — the HTTP
     # response is not held waiting for the ~15-30 s block confirmation.
     threading.Thread(
         target=_submit_to_chain,
-        args=(message.id, message.integrity_hash or ""),
+        args=(file_obj.id, file_obj.integrity_hash or ""),
         daemon=True,
     ).start()
 
     return {
-        "id":                 message.id,
-        "sender_id":          message.sender_id,
-        "sender_username":    current_user.username,
+        "id":                 file_obj.id,
+        "owner_id":           file_obj.owner_id,
+        "owner_username":     current_user.username,
         "recipient_username": body.recipient_username,
-        "subject":            message.subject,
-        "filename":           message.filename,
-        "content_type":       message.content_type,
-        "size_bytes":         message.size_bytes,
+        "subject":            file_obj.subject,
+        "filename":           file_obj.filename,
+        "content_type":       file_obj.content_type,
+        "size_bytes":         file_obj.size_bytes,
         "is_read":            False,
-        "is_deleted":         message.is_deleted,
-        "created_at":         message.created_at,
+        "is_deleted":         file_obj.is_deleted,
+        "created_at":         file_obj.created_at,
     }
 
 
 # ---------------------------------------------------------------------------
-# GET /messages/inbox
+# GET /files/shared
 # ---------------------------------------------------------------------------
 
 @router.get(
-    "/inbox",
+    "/shared",
     response_model=list[FileListItem],
-    summary="List received messages",
+    summary="List files shared with me",
 )
-def get_inbox(
+def list_shared_files(
     current_user: models.User = Depends(get_current_user),
     db: Session = Depends(get_db),
     skip:  int = Query(default=0,  ge=0,           description="Offset for pagination."),
     limit: int = Query(default=50, ge=1,  le=200,  description="Max items to return."),
 ) -> list[dict]:
-    """Return a paginated summary list of messages received by the current user.
+    """Return a paginated summary list of files shared with the current user.
 
-    **No ciphertext is returned here** — use `GET /messages/{id}/download`
-    to fetch the encrypted payload for a specific message.  This keeps the
+    **No ciphertext is returned here** — use `GET /files/{id}/download`
+    to fetch the encrypted payload for a specific file.  This keeps the
     listing fast and prevents bulk ciphertext exposure.
 
-    Messages are returned newest-first.  Fetching the inbox does NOT mark
-    messages as read; that happens only on `/download`.
+    Files are returned newest-first.  Fetching the listing does NOT mark
+    files as read; that happens only on `/download`.
     """
-    # Single JOIN query to avoid N+1 lookups for sender usernames.
+    # Single JOIN query to avoid N+1 lookups for owner usernames.
     stmt = (
         select(models.FileObject, models.FileAccess, models.User)
         .join(
@@ -512,12 +493,12 @@ def get_inbox(
         )
         .outerjoin(
             models.User,
-            models.User.id == models.FileObject.sender_id,
+            models.User.id == models.FileObject.owner_id,
         )
         .where(
             models.FileAccess.recipient_id == current_user.id,
-            # is_deleted is a sender-side flag only; recipients retain inbox
-            # visibility even after the sender deletes their copy.
+            # is_deleted is an owner-side flag only; recipients retain
+            # visibility even after the owner deletes their copy.
         )
         .order_by(models.FileObject.created_at.desc())
         .offset(skip)
@@ -527,49 +508,49 @@ def get_inbox(
 
     return [
         {
-            "id":              msg.id,
-            "sender_id":       msg.sender_id,
-            "sender_username": sender.username if sender else None,
-            "subject":         msg.subject,
-            "filename":        msg.filename,
-            "content_type":    msg.content_type,
-            "size_bytes":      msg.size_bytes,
+            "id":              file_obj.id,
+            "owner_id":        file_obj.owner_id,
+            "owner_username":  owner.username if owner else None,
+            "subject":         file_obj.subject,
+            "filename":        file_obj.filename,
+            "content_type":    file_obj.content_type,
+            "size_bytes":      file_obj.size_bytes,
             "is_read":         access.is_read,
-            "is_deleted":      msg.is_deleted,
-            "is_forwarded":    bool(msg.is_forwarded),
-            "created_at":      msg.created_at,
+            "is_deleted":      file_obj.is_deleted,
+            "is_forwarded":    bool(file_obj.is_forwarded),
+            "created_at":      file_obj.created_at,
         }
-        for msg, access, sender in rows
+        for file_obj, access, owner in rows
     ]
 
 
 # ---------------------------------------------------------------------------
-# GET /messages/sent
+# GET /files/owned
 # ---------------------------------------------------------------------------
 
 @router.get(
-    "/sent",
+    "/owned",
     response_model=list[FileListItem],
-    summary="List sent messages",
+    summary="List files I uploaded",
 )
-def get_sent(
+def list_owned_files(
     current_user: models.User = Depends(get_current_user),
     db: Session = Depends(get_db),
     skip:  int = Query(default=0,  ge=0,          description="Offset for pagination."),
     limit: int = Query(default=50, ge=1, le=200,  description="Max items to return."),
 ) -> list[dict]:
-    """Return a paginated summary list of messages sent by the current user.
+    """Return a paginated summary list of files uploaded by the current user.
 
-    No ciphertext is included.  Messages are returned newest-first.
-    Soft-deleted messages are excluded.
+    No ciphertext is included.  Files are returned newest-first.
+    Soft-deleted files are excluded.
     """
     # Alias User as the recipient so SQLAlchemy can distinguish it from the
-    # sender join used elsewhere in the query.
+    # owner join used elsewhere in the query.
     RecipientUser = aliased(models.User, name="recipient")
 
-    # Subquery: for each message, pick the *first* FileAccess row by id.
+    # Subquery: for each file, pick the *first* FileAccess row by id.
     # This gives us the original direct recipient and avoids duplicate rows
-    # when a message has been forwarded to additional people.
+    # when a file has been shared with additional people.
     first_access_sq = (
         select(
             func.min(models.FileAccess.id).label("id"),
@@ -591,7 +572,7 @@ def get_sent(
             RecipientUser.id == models.FileAccess.recipient_id,
         )
         .where(
-            models.FileObject.sender_id == current_user.id,
+            models.FileObject.owner_id == current_user.id,
             models.FileObject.is_deleted.is_(False),
         )
         .order_by(models.FileObject.created_at.desc())
@@ -602,161 +583,166 @@ def get_sent(
 
     return [
         {
-            "id":                 msg.id,
-            "sender_id":          msg.sender_id,
-            "sender_username":    current_user.username,
+            "id":                 file_obj.id,
+            "owner_id":           file_obj.owner_id,
+            "owner_username":     current_user.username,
             "recipient_username": recipient.username,
-            "subject":            msg.subject,
-            "filename":           msg.filename,
-            "content_type":       msg.content_type,
-            "size_bytes":         msg.size_bytes,
-            "is_read":            True,   # sender always "read" their own outgoing message
-            "is_deleted":         msg.is_deleted,
-            "created_at":         msg.created_at,
+            "subject":            file_obj.subject,
+            "filename":           file_obj.filename,
+            "content_type":       file_obj.content_type,
+            "size_bytes":         file_obj.size_bytes,
+            "is_read":            True,   # owner has trivially "read" their own upload
+            "is_deleted":         file_obj.is_deleted,
+            "created_at":         file_obj.created_at,
         }
-        for msg, recipient in rows
+        for file_obj, recipient in rows
     ]
 
 
 # ---------------------------------------------------------------------------
-# DELETE /messages/{id}
+# DELETE /files/{id}
 # ---------------------------------------------------------------------------
 
 @router.delete(
-    "/{message_id}",
+    "/{file_id}",
     response_model=DetailResponse,
-    summary="Soft-delete a sent message",
+    summary="Soft-delete an uploaded file",
     responses={
-        403: {"description": "Not the sender"},
-        404: {"description": "Message not found"},
+        403: {"description": "Not the owner"},
+        404: {"description": "File not found"},
     },
 )
-def delete_message(
-    message_id: int,
+def delete_file(
+    file_id: int,
     current_user: models.User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> dict:
-    """Soft-delete a message.  Only the original sender may do this.
+    """Soft-delete a file.  Only the owner may do this.
 
-    Sets `is_deleted = True`.  The message row and its BlockchainRecord are
+    Sets `is_deleted = True`.  The file row and its BlockchainRecord are
     preserved for audit-chain integrity (the FK is RESTRICT — hard deletion
-    would break the chain).  The server will no longer return this message
-    in inbox/sent listings or serve its ciphertext via download.
+    would break the chain).  The server will no longer return this file
+    in the owner's listings or serve it to the owner; existing recipients
+    retain access via their FileAccess rows (use /revoke to cut
+    recipients off).
     """
-    message = _load_active_message(message_id, db)
-    _require_sender(message, current_user)
+    file_obj = _load_active_file(file_id, db)
+    _require_owner(file_obj, current_user)
 
-    message.is_deleted = True
-    db.add(message)
+    file_obj.is_deleted = True
+    db.add(file_obj)
     db.commit()
 
-    return {"detail": "Message deleted."}
+    return {"detail": "File deleted."}
 
 
 # ---------------------------------------------------------------------------
-# POST /messages/{id}/forward
+# POST /files/{id}/share
 # ---------------------------------------------------------------------------
 
 @router.post(
-    "/{message_id}/forward",
+    "/{file_id}/share",
     response_model=DetailResponse,
-    summary="Forward a message to a new recipient",
+    summary="Share a file with a new recipient",
     responses={
-        403: {"description": "No read access to this message"},
-        404: {"description": "Message or recipient not found"},
+        403: {"description": "No read access to this file"},
+        404: {"description": "File or recipient not found"},
         409: {"description": "Recipient already has access"},
     },
 )
-def forward_message(
-    message_id: int,
+def share_file(
+    file_id: int,
     body: ShareRequest,
     current_user: models.User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> dict:
-    """Grant a new recipient access to an existing message.
+    """Grant a new recipient access to an existing file.
 
-    The forwarder must be either the original sender or an existing recipient.
-    Because the ciphertext is already encrypted to a specific recipient via
-    the wrapped `encrypted_key`, the forwarder must:
+    The sharer must be either the owner or an existing recipient.
+    Because the ciphertext is encrypted for a specific recipient (the
+    content key is derived from that recipient's key pair via HPKE), the
+    sharer must:
 
-    1. Decrypt the message_key using their own private key.
-    2. Re-encrypt message_key with the new recipient's public key.
-    3. Supply the re-wrapped key as `encrypted_key` in this request.
+    1. Decrypt the file on their own device.
+    2. Re-encrypt it for the new recipient
+       (fresh HPKE encapsulation against the new recipient's public key).
+    3. Supply new_ciphertext / new_nonce / new_encrypted_key in this request.
 
-    Without this, the new recipient receives the ciphertext but cannot
-    unwrap the key and therefore cannot decrypt it.
+    When all three re-encryption fields are present the backend creates a
+    brand-new file row so the new recipient can actually decrypt it.
 
-    The server creates a new `file_access` row; the ciphertext is NOT
-    copied (the same encrypted blob is shared).
+    The legacy path (no re-encryption fields) only adds an access row that
+    shares the original ciphertext — the new recipient can download but
+    cannot decrypt it; kept for backward compatibility.
     """
-    # Load without the is_deleted gate: a sender's soft-delete only hides the
-    # message from the sender's own view; recipients who still have a
-    # FileAccess row retain read (and forward) access.
-    message = db.get(models.FileObject, message_id)
-    if message is None:
+    # Load without the is_deleted gate: an owner's soft-delete only hides the
+    # file from the owner's own view; recipients who still have a
+    # FileAccess row retain read (and share) access.
+    file_obj = db.get(models.FileObject, file_id)
+    if file_obj is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND,
-                            detail="Message not found.")
+                            detail="File not found.")
 
-    if message.sender_id == current_user.id:
-        # Sender: may not forward after they deleted their own copy.
-        if message.is_deleted:
+    if file_obj.owner_id == current_user.id:
+        # Owner: may not share after they deleted their own copy.
+        if file_obj.is_deleted:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND,
-                                detail="Message not found.")
+                                detail="File not found.")
     else:
         # Recipient: access is controlled by FileAccess row only.
-        if _get_access_record(message.id, current_user.id, db) is None:
+        if _get_access_record(file_obj.id, current_user.id, db) is None:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND,
-                                detail="Message not found.")
+                                detail="File not found.")
 
     new_recipient = _lookup_active_user(body.recipient_username, db)
 
-    # Prevent self-forward
+    # Prevent self-share
     if new_recipient.id == current_user.id:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Cannot forward a message to yourself.",
+            detail="Cannot share a file with yourself.",
         )
 
     # Idempotency guard — avoid duplicate access rows
-    if _get_access_record(message.id, new_recipient.id, db):
+    if _get_access_record(file_obj.id, new_recipient.id, db):
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
-            detail="That user already has access to this message.",
+            detail="That user already has access to this file.",
         )
 
     if body.new_ciphertext and body.new_nonce and body.new_encrypted_key:
-        # ── Re-encrypted forward (preferred) ────────────────────────────
-        # The forwarder decrypted the original on their device and re-encrypted
-        # it for the new recipient.  Create a fresh Message row so the new
+        # ── Re-encrypted share (preferred) ────────────────────────────
+        # The sharer decrypted the original on their device and re-encrypted
+        # it for the new recipient.  Create a fresh file row so the new
         # recipient can actually decrypt the content with their own key pair.
         stored_blob = _pack(body.new_nonce, body.new_ciphertext)
         integrity   = bytes(Web3.keccak(text=stored_blob)).hex()  # 64-char hex, no 0x
 
-        fwd_msg = models.FileObject(
-            sender_id=current_user.id,
+        shared_file = models.FileObject(
+            owner_id=current_user.id,
             ciphertext=stored_blob,
-            subject=message.subject,
-            filename=message.filename,
-            content_type=message.content_type,
-            size_bytes=message.size_bytes,
+            subject=file_obj.subject,
+            filename=file_obj.filename,
+            content_type=file_obj.content_type,
+            size_bytes=file_obj.size_bytes,
             integrity_hash=integrity,
             is_forwarded=True,
         )
-        db.add(fwd_msg)
-        db.flush()   # allocate fwd_msg.id
+        db.add(shared_file)
+        db.flush()   # allocate shared_file.id
 
         db.add(models.FileAccess(
-            file_id=fwd_msg.id,
+            file_id=shared_file.id,
             recipient_id=new_recipient.id,
             encrypted_key=body.new_encrypted_key,
         ))
 
-        _append_blockchain_record(fwd_msg, db)
+        _append_blockchain_record(shared_file, db)
         db.commit()
 
         threading.Thread(
             target=_submit_to_chain,
-            args=(fwd_msg.id, fwd_msg.integrity_hash),
+            args=(shared_file.id, shared_file.integrity_hash),
             daemon=True,
         ).start()
     else:
@@ -764,75 +750,72 @@ def forward_message(
         # The new recipient receives the original ciphertext but cannot
         # decrypt it (it was encrypted for the original recipient's key).
         db.add(models.FileAccess(
-            file_id=message.id,
+            file_id=file_obj.id,
             recipient_id=new_recipient.id,
             encrypted_key=body.encrypted_key,
         ))
         db.commit()
 
-    return {"detail": f"Message forwarded to {new_recipient.username}."}
+    return {"detail": f"File shared with {new_recipient.username}."}
 
 
 # ---------------------------------------------------------------------------
-# POST /messages/{id}/revoke
+# POST /files/{id}/revoke
 # ---------------------------------------------------------------------------
 
 @router.post(
-    "/{message_id}/revoke",
+    "/{file_id}/revoke",
     response_model=DetailResponse,
-    summary="Revoke message access",
+    summary="Revoke file access",
     responses={
-        403: {"description": "Not the sender"},
-        404: {"description": "Message or recipient not found"},
+        403: {"description": "Not the owner"},
+        404: {"description": "File or recipient not found"},
     },
 )
-def revoke_message(
-    message_id: int,
+def revoke_access(
+    file_id: int,
     body: RevokeRequest,
     current_user: models.User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> dict:
-    """Revoke access to a message.  Only the original sender may do this.
+    """Revoke access to a file.  Only the owner may do this.
 
-    **Without `recipient_username`** — full revocation: sets `is_deleted = True`
-    so the server stops serving the message to all recipients.  The ciphertext
-    and BlockchainRecord are preserved (RESTRICT FK); only the access flag changes.
+    **Without `recipient_username`** — full revocation: removes every
+    recipient's `file_access` row so no recipient can download the file.
+    The file row, ciphertext, and BlockchainRecord are preserved —
+    revocation is an access-control action, not a deletion.  The owner can
+    still see the file in their owned list.
 
     **With `recipient_username`** — targeted revocation: removes that specific
     recipient's `file_access` row.  Other recipients are unaffected.
-    The message itself remains active; the server simply stops serving the
-    ciphertext to that one user.
 
     Note: revocation is a server-side access control measure.  Any recipient
-    who already downloaded and decrypted the message retains their local
-    plaintext copy — the server cannot un-decrypt a message already received.
+    who already downloaded and decrypted the file retains their local
+    plaintext copy — the server cannot un-decrypt a file already received.
     """
-    message = _load_active_message(message_id, db)
-    _require_sender(message, current_user)
+    file_obj = _load_active_file(file_id, db)
+    _require_owner(file_obj, current_user)
 
     if body.recipient_username is None:
         # Full revocation: remove every FileAccess row so no recipient can
-        # download the message.  The message row, ciphertext, and blockchain
-        # record are intentionally preserved — revocation is an access-control
-        # action, not a deletion.  is_deleted is NOT set so the sender can still
-        # see the message in their sent list (the frontend shows "Access revoked").
+        # download the file.
         access_rows = db.scalars(
             select(models.FileAccess).where(
-                models.FileAccess.file_id == message.id
+                models.FileAccess.file_id == file_obj.id
             )
         ).all()
         for row in access_rows:
             db.delete(row)
         db.commit()
-        return {"detail": "Message access revoked for all recipients."}
+        return {"detail": "File access revoked for all recipients."}
 
     # Targeted revocation: remove only this recipient's access row.
     target = _lookup_active_user(body.recipient_username, db)
-    access = _get_access_record(message.id, target.id, db)
+    access = _get_access_record(file_obj.id, target.id, db)
     if access is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"{target.username} does not have access to this message.",
+            detail=f"{target.username} does not have access to this file.",
         )
 
     db.delete(access)
@@ -842,59 +825,59 @@ def revoke_message(
 
 
 # ---------------------------------------------------------------------------
-# GET /messages/{id}/download
+# GET /files/{id}/download
 # ---------------------------------------------------------------------------
 
 @router.get(
-    "/{message_id}/download",
+    "/{file_id}/download",
     response_model=FileDownloadResponse,
-    summary="Download a message's encrypted payload",
+    summary="Download a file's encrypted payload",
     responses={
-        404: {"description": "Message not found or no access"},
+        404: {"description": "File not found or no access"},
     },
 )
-def download_message(
-    message_id: int,
+def download_file(
+    file_id: int,
     current_user: models.User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> dict:
-    """Return the full encrypted payload needed to decrypt a message.
+    """Return the full encrypted payload needed to decrypt a file.
 
-    Verifies that `current_user` is either the sender or an authorised
+    Verifies that `current_user` is either the owner or an authorised
     recipient (via `file_access`).  Returns 404 — not 403 — on any
-    access failure to prevent IDOR: a 403 would confirm the message exists
+    access failure to prevent IDOR: a 403 would confirm the file exists
     to someone who has no business knowing that.
 
     **Returned fields for decryption:**
     - `ciphertext`       — the combined stored blob (nonce ‖ ciphertext)
     - `nonce`            — the first 12 decoded bytes, re-encoded as base64
-    - `associated_data`  — the canonical AAD; pass this to `decrypt()`
-    - `encrypted_key`    — the recipient's wrapped key material
+    - `associated_data`  — the canonical context string (informational)
+    - `encrypted_key`    — the recipient's HPKE encapsulated key
 
-    Marks the message as read in `file_access` (only for recipients;
-    senders are implicitly always "read").
+    Marks the file as read in `file_access` (only for recipients;
+    owners are implicitly always "read").
     """
-    # Load the raw message row without the is_deleted gate so that recipients
-    # can still download a message the sender soft-deleted (delete is sender-only).
-    message = db.get(models.FileObject, message_id)
-    if message is None:
+    # Load the raw file row without the is_deleted gate so that recipients
+    # can still download a file the owner soft-deleted (delete is owner-only).
+    file_obj = db.get(models.FileObject, file_id)
+    if file_obj is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND,
-                            detail="Message not found.")
+                            detail="File not found.")
 
-    if message.sender_id == current_user.id:
-        # Sender: is_deleted hides the message from their own view.
-        if message.is_deleted:
+    if file_obj.owner_id == current_user.id:
+        # Owner: is_deleted hides the file from their own view.
+        if file_obj.is_deleted:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND,
-                                detail="Message not found.")
+                                detail="File not found.")
         access = None
     else:
         # Recipient: access is controlled solely by the FileAccess row.
-        # A missing row means either the message never existed for them, or
+        # A missing row means either the file never existed for them, or
         # access was revoked — both surface as 404 to prevent IDOR.
-        access = _get_access_record(message.id, current_user.id, db)
+        access = _get_access_record(file_obj.id, current_user.id, db)
         if access is None:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND,
-                                detail="Message not found.")
+                                detail="File not found.")
 
     # ------------------------------------------------------------------
     # Split the stored blob into nonce and ciphertext.
@@ -902,15 +885,15 @@ def download_message(
     # as a server-side data integrity failure.
     # ------------------------------------------------------------------
     try:
-        nonce_b64, _ct_b64 = _unpack(message.ciphertext)
+        nonce_b64, _ct_b64 = _unpack(file_obj.ciphertext)
     except ValueError:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Message data is corrupted.",
+            detail="File data is corrupted.",
         )
 
     # ------------------------------------------------------------------
-    # Mark as read (only recipients have an access row; senders do not).
+    # Mark as read (only recipients have an access row; owners do not).
     # ------------------------------------------------------------------
     if access is not None and not access.is_read:
         access.is_read = True
@@ -919,89 +902,89 @@ def download_message(
         db.commit()
 
     # ------------------------------------------------------------------
-    # Canonical AAD.
+    # Canonical context string.
     # For recipients: their ID is in the access row.
-    # For the sender reading their own sent message: use the sender's own
-    # ID as the recipient_id placeholder.  The sender should not normally
-    # decrypt messages they sent (they already have the plaintext), but
-    # this allows self-audit without erroring.
+    # For the owner reading their own file: use the owner's own ID as the
+    # recipient_id placeholder.  The owner should not normally decrypt
+    # files they uploaded (they already have the plaintext), but this
+    # allows self-audit without erroring.
     # ------------------------------------------------------------------
     recipient_id = access.recipient_id if access else current_user.id
-    aad = _canonical_aad(message.sender_id, recipient_id, message.id)
+    aad = _canonical_aad(file_obj.owner_id, recipient_id, file_obj.id)
 
     # ------------------------------------------------------------------
-    # Resolve sender display name (single DB lookup; not in a join because
+    # Resolve owner display name (single DB lookup; not in a join because
     # this endpoint returns one row, not a list).
     # ------------------------------------------------------------------
-    sender = db.get(models.User, message.sender_id) if message.sender_id else None
+    owner = db.get(models.User, file_obj.owner_id) if file_obj.owner_id else None
 
     return {
-        "id":              message.id,
-        "sender_id":       message.sender_id,
-        "sender_username": sender.username if sender else None,
-        "ciphertext":      message.ciphertext,
+        "id":              file_obj.id,
+        "owner_id":        file_obj.owner_id,
+        "owner_username":  owner.username if owner else None,
+        "ciphertext":      file_obj.ciphertext,
         "nonce":           nonce_b64,
         "associated_data": aad,
         "encrypted_key":   access.encrypted_key if access else None,
-        "subject":         message.subject,
-        "filename":        message.filename,
-        "content_type":    message.content_type,
-        "size_bytes":      message.size_bytes,
-        "integrity_hash":  message.integrity_hash,
+        "subject":         file_obj.subject,
+        "filename":        file_obj.filename,
+        "content_type":    file_obj.content_type,
+        "size_bytes":      file_obj.size_bytes,
+        "integrity_hash":  file_obj.integrity_hash,
         "is_read":         access.is_read if access else True,
-        "created_at":      message.created_at,
+        "created_at":      file_obj.created_at,
     }
 
 
 # ---------------------------------------------------------------------------
-# GET /messages/{id}/blockchain-proof
+# GET /files/{id}/blockchain-proof
 # ---------------------------------------------------------------------------
 
 @router.get(
-    "/{message_id}/blockchain-proof",
-    summary="Retrieve on-chain proof for a message",
+    "/{file_id}/blockchain-proof",
+    summary="Retrieve on-chain proof for a file",
     responses={
-        404: {"description": "Message not found or no access"},
+        404: {"description": "File not found or no access"},
     },
 )
 def get_blockchain_proof(
-    message_id: int,
+    file_id: int,
     current_user: models.User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> dict:
-    """Return the blockchain proof for a message.
+    """Return the blockchain proof for a file.
 
     Recomputes keccak256 of the stored ciphertext, compares it to the
     persisted integrity_hash, and (if an Ethereum tx hash exists) fetches
     the on-chain hash from the Sepolia contract for final verification.
 
     Response fields:
-      stored_hash   — keccak256 recorded at send time (from SQLite)
+      stored_hash   — keccak256 recorded at upload time (from SQLite)
       computed_hash — keccak256 freshly computed from the current ciphertext
       hash_match    — True when stored == computed (ciphertext not tampered)
       eth_tx_hash   — Sepolia tx hash, or null if not yet anchored
       on_chain      — contract record {exists, hash, timestamp, recorder} or null
       on_chain_match— True when on-chain hash == computed hash, or null
     """
-    message = db.get(models.FileObject, message_id)
-    if message is None:
+    file_obj = db.get(models.FileObject, file_id)
+    if file_obj is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND,
-                            detail="Message not found.")
+                            detail="File not found.")
 
-    if message.sender_id == current_user.id:
-        if message.is_deleted:
+    if file_obj.owner_id == current_user.id:
+        if file_obj.is_deleted:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND,
-                                detail="Message not found.")
+                                detail="File not found.")
     else:
-        if _get_access_record(message.id, current_user.id, db) is None:
+        if _get_access_record(file_obj.id, current_user.id, db) is None:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND,
-                                detail="Message not found.")
+                                detail="File not found.")
 
-    rec          = message.blockchain_record
-    stored_hash  = message.integrity_hash or ""
-    # Recompute using the same algorithm as the send/forward endpoints:
+    rec          = file_obj.blockchain_record
+    stored_hash  = file_obj.integrity_hash or ""
+    # Recompute using the same algorithm as the upload/share endpoints:
     # bytes(Web3.keccak(text=blob)).hex() — guaranteed 64-char keccak256 hex.
-    computed_hash = bytes(Web3.keccak(text=message.ciphertext)).hex()
+    computed_hash = bytes(Web3.keccak(text=file_obj.ciphertext)).hex()
     hash_match   = bool(stored_hash and computed_hash == stored_hash)
 
     result: dict = {

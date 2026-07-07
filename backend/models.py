@@ -20,6 +20,7 @@ new schema.  For an existing database that must be preserved:
     ALTER TABLE message_access RENAME TO file_access;
     ALTER TABLE file_access RENAME COLUMN message_id TO file_id;
     ALTER TABLE blockchain_records RENAME COLUMN message_id TO file_id;
+    ALTER TABLE files RENAME COLUMN sender_id TO owner_id;
     ALTER TABLE files ADD COLUMN filename VARCHAR(255);
     ALTER TABLE files ADD COLUMN content_type VARCHAR(127);
     ALTER TABLE files ADD COLUMN size_bytes INTEGER;
@@ -72,8 +73,8 @@ class User(Base):
     )
 
     # Relationships
-    sent_files: Mapped[list["FileObject"]] = relationship(
-        "FileObject", back_populates="sender", foreign_keys="FileObject.sender_id"
+    owned_files: Mapped[list["FileObject"]] = relationship(
+        "FileObject", back_populates="owner", foreign_keys="FileObject.owner_id"
     )
     sessions: Mapped[list["Session"]] = relationship("Session", back_populates="user")
     access_records: Mapped[list["FileAccess"]] = relationship(
@@ -118,15 +119,15 @@ class FileObject(Base):
     An encrypted file in the mailbox.  The ciphertext is stored opaquely; only
     an authorised recipient can decrypt it using their private key.
 
-    ``sender_id`` is the uploading user (the file's owner).  The owner/grantee
-    terminology lands with the /files router rework; the column name is kept
-    here so this rename stays mechanical.
+    ``owner_id`` is the uploading user.  In HPKE terms the owner is the
+    *sender* (their static key authenticates the ciphertext); recipients are
+    the users holding FileAccess rows.
     """
 
     __tablename__ = "files"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
-    sender_id: Mapped[int] = mapped_column(
+    owner_id: Mapped[int] = mapped_column(
         Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True
     )
 
@@ -163,8 +164,8 @@ class FileObject(Base):
     )
 
     # Relationships
-    sender: Mapped["User"] = relationship(
-        "User", back_populates="sent_files", foreign_keys=[sender_id]
+    owner: Mapped["User"] = relationship(
+        "User", back_populates="owned_files", foreign_keys=[owner_id]
     )
     access_records: Mapped[list["FileAccess"]] = relationship(
         "FileAccess", back_populates="file"

@@ -130,7 +130,7 @@ def auth_headers(client):
 
 
 @pytest.fixture
-def make_message_payload():
+def make_file_payload():
     """Return a helper that builds a valid FileUpload payload with random crypto material."""
 
     def _payload(recipient_username: str) -> dict:

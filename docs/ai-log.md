@@ -198,6 +198,72 @@ Design choices not explicitly specified in my direction:
   locally rather than trust the server's string.
 - **DECISION — null filename canonicalises to empty string** in the AAD.
 
-**Corrections / rejections:** none.
+**Corrections / rejections:** I directed that the wording in the design
+document and this log be tightened after review: the AAD *mechanism* being
+implemented in all three stacks must not read as enforcement being live —
+no shipped client bound real values at that point.
+
+---
+
+## Entry 5 — Web client rework: file manager, AAD binding, TOFU pinning
+
+**What I asked for:**
+- Replace the chat UI with a file-manager web client on the /files API:
+  owned + shared listings, encrypt-and-upload, download-and-decrypt, share,
+  revoke, delete.
+- Binary-safe encryption in crypto.js (files, not just strings).
+- Bind the canonical AAD at the web client's call sites (activating the
+  chunk-4 mechanism for this client).
+- Implement TOFU key pinning for real — I had directed after the design-doc
+  review that it must be implemented in the client rework, not remain a
+  documented limitation.
+
+**What was produced:**
+- `crypto.js`: binary core (`encryptFile`/`decryptFile` on raw bytes; string
+  functions kept as wrappers); TOFU pin store in IndexedDB (schema v2, pins
+  keyed per local account + peer), `checkTofuPin`/`overridePin`/
+  `keyFingerprint` (SHA-256 fingerprint, grouped hex).
+- `files.html` + `files.js`: two-tab file manager (Shared with me /
+  My uploads), upload modal with recipient autocomplete and 8 MB client-side
+  pre-check, decrypt-and-save download, re-encrypt share, revoke, delete,
+  unread badge, blockchain-verify links, change-password modal.
+- TOFU gating on BOTH directions: recipient key verified before encrypt
+  (upload/share), owner key verified before decrypt (download). First
+  sighting auto-pins with a toast; a mismatch hard-blocks with a warning
+  modal showing both fingerprints — proceeding requires an explicit
+  "I verified it — trust new key" click, which re-pins.
+- AAD bound at every call site: upload builds
+  `buildFileAad(me, recipient, file.name)`; download/share REBUILD the AAD
+  locally from response metadata + own username (never trusting the
+  server-returned string) so a relabelled filename fails the tag check.
+- `auth.js`/`verify.js`/`verify.html` moved to the /files endpoints and
+  file terminology; `chat.html`/`chat.js` deleted.
+- Verification: backend suite 21/21; all JS syntax-checked; the production
+  `crypto.js` executed under Node 22's Web Crypto and interop-tested against
+  Python — encrypt/decrypt with AAD in both directions, byte-exact binary
+  round-trip, relabelled filename rejected both ways; static serving of the
+  new pages confirmed.
+
+Design choices not explicitly specified in my direction:
+- **DECISION — no AAD-less fallback on decrypt failure:** retrying without
+  AAD would let a malicious server strip relabelling protection (downgrade
+  attack), so there is none — files uploaded by the old message client are
+  not readable in the new UI.
+- **DECISION — TOFU mismatch UX:** hard-block modal, Cancel as the default
+  action, explicit override re-pins (Signal's safety-number model); pins are
+  per (local account, peer) so multiple accounts in one browser have
+  independent trust stores.
+- **DECISION — share is recipient-side only:** an owner cannot decrypt their
+  own upload (the content key derives from the recipient's key pair), so
+  re-encryption sharing is offered on received files, not owned ones.
+- **DECISION — API base from `location.origin`** (shared `config.js`) instead
+  of a hardcoded host — the client is served by the backend, so same-origin
+  is always correct and matches the CSP.
+- **DECISION — page-scoped styles inline in files.html** rather than
+  editing the 1000-line shared stylesheet; chat-specific CSS left in place
+  (dead but harmless) for a later cleanup pass.
+- **DECISION — cosmetic rebrand** SecureMsg → SecureMailbox in page titles.
+
+**Corrections / rejections:** none yet (pending review of this chunk).
 
 ---

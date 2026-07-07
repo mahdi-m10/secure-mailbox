@@ -9,9 +9,8 @@
  *   - Private key NEVER leaves the browser crypto engine or transits the network.
  */
 
+import { API } from './config.js';
 import { generateKeyPair, saveKeyPair, hasKeyPair, migrateLocalStorageKey } from './crypto.js';
-
-const API = 'https://team10.theburkenator.com';
 
 // ---------- Session helpers ---------------------------------------------------
 
@@ -26,8 +25,8 @@ function isLoggedIn() { return !!localStorage.getItem('sm_token'); }
 // ---------- Page init ---------------------------------------------------------
 
 document.addEventListener('DOMContentLoaded', () => {
-  // Already authenticated → go straight to chat
-  if (isLoggedIn()) { window.location.href = 'chat.html'; return; }
+  // Already authenticated → go straight to the mailbox
+  if (isLoggedIn()) { window.location.href = 'files.html'; return; }
 
   // Tab switching
   document.querySelectorAll('.auth-tab').forEach(tab => {
@@ -153,7 +152,7 @@ async function handleLogin(e) {
       localStorage.removeItem(`sm_pubkey_${username}`);
     }
 
-    window.location.href = 'chat.html';
+    window.location.href = 'files.html';
 
   } catch (err) {
     setStatus(status, err.message, 'error');

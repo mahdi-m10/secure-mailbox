@@ -2,16 +2,16 @@
  * verify.js — Blockchain integrity verification for verify.html
  *
  * Verification flow:
- *   1. GET /messages/{id}/download          — message metadata (sender, subject, AAD)
- *   2. GET /messages/{id}/blockchain-proof  — server-computed keccak256 comparison
- *                                             + Sepolia on-chain lookup
+ *   1. GET /files/{id}/download          — file metadata (owner, filename, AAD)
+ *   2. GET /files/{id}/blockchain-proof  — server-computed keccak256 comparison
+ *                                          + Sepolia on-chain lookup
  *
  * The backend computes keccak256(ciphertext) and compares it to the stored
  * integrity_hash, then optionally fetches the matching hash from the Sepolia
  * smart contract for cryptographic proof of anchoring.
  */
 
-const API = 'https://team10.theburkenator.com';
+import { API } from './config.js';
 
 const ETHERSCAN_TX = 'https://sepolia.etherscan.io/tx/';
 
@@ -50,13 +50,13 @@ async function handleVerify(e) {
     const headers = getToken() ? { Authorization: `Bearer ${getToken()}` } : {};
 
     const [msgRes, proofRes] = await Promise.all([
-      fetch(`${API}/messages/${encodeURIComponent(msgId)}/download`,          { headers }),
-      fetch(`${API}/messages/${encodeURIComponent(msgId)}/blockchain-proof`,  { headers }),
+      fetch(`${API}/files/${encodeURIComponent(msgId)}/download`,          { headers }),
+      fetch(`${API}/files/${encodeURIComponent(msgId)}/blockchain-proof`,  { headers }),
     ]);
 
     if (msgRes.status === 401) throw new Error('Authentication required — please sign in first.');
-    if (msgRes.status === 403) throw new Error('You do not have permission to access this message.');
-    if (msgRes.status === 404) throw new Error('Message not found, or it has been deleted.');
+    if (msgRes.status === 403) throw new Error('You do not have permission to access this file.');
+    if (msgRes.status === 404) throw new Error('File not found, or it has been deleted.');
     if (!msgRes.ok)            throw new Error(`Server error (HTTP ${msgRes.status}).`);
 
     const msg   = await msgRes.json();
@@ -155,13 +155,14 @@ function renderResult({ msg, proof }) {
       onChain.recorder ?? '—';
   }
 
-  // ── Message metadata ──────────────────────────────────────────────────────
+  // ── File metadata ─────────────────────────────────────────────────────────
   document.getElementById('meta-msg-id').textContent    = msg.id;
-  document.getElementById('meta-sender').textContent    = msg.sender_username ?? 'Unknown';
+  document.getElementById('meta-sender').textContent    = msg.owner_username ?? 'Unknown';
   document.getElementById('meta-read').textContent      = msg.is_read ? 'Yes' : 'No';
   document.getElementById('meta-timestamp').textContent =
     new Date(msg.created_at + (msg.created_at.endsWith('Z') ? '' : 'Z')).toLocaleString();
-  document.getElementById('meta-subject').textContent   = msg.subject ?? '(no subject)';
+  document.getElementById('meta-subject').textContent   =
+    msg.filename ?? msg.subject ?? '(unnamed file)';
 
   const aadEl = document.getElementById('meta-aad');
   aadEl.textContent = msg.associated_data ?? '(none)';

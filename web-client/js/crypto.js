@@ -1,5 +1,5 @@
 /**
- * crypto.js — Web Crypto API helpers for SecureMsg
+ * crypto.js — Web Crypto API helpers for SecureMailbox
  *
  * Key scheme: HPKE Mode_Auth (RFC 9180)
  *   KEM  — DHKEM(X25519)      raw 32-byte keys, matches backend users.public_key column
@@ -80,14 +80,18 @@ export function importPublicKey(b64) {
 // ---- IndexedDB key storage --------------------------------------------------
 
 const _DB_NAME    = 'securemsg';
-const _DB_VERSION = 1;
+const _DB_VERSION = 2;          // v2 adds the 'pins' store (TOFU)
 const _STORE      = 'keyring';
+const _PIN_STORE  = 'pins';
 
 function _openDB() {
   return new Promise((resolve, reject) => {
     const req = indexedDB.open(_DB_NAME, _DB_VERSION);
     req.onupgradeneeded = ({ target: { result: db } }) => {
-      db.createObjectStore(_STORE);
+      // Guarded creates so both fresh installs (no stores) and v1→v2
+      // upgrades (keyring exists, pins doesn't) work.
+      if (!db.objectStoreNames.contains(_STORE))     db.createObjectStore(_STORE);
+      if (!db.objectStoreNames.contains(_PIN_STORE)) db.createObjectStore(_PIN_STORE);
     };
     req.onsuccess = ({ target: { result } }) => resolve(result);
     req.onerror   = () => reject(req.error);
@@ -172,6 +176,84 @@ export async function migrateLocalStorageKey(username) {
   }
 }
 
+// ---- TOFU key pinning ---------------------------------------------------------
+//
+// Trust On First Use: the first public key seen for a peer is stored (pinned)
+// per local account. Every later fetch is compared against the pin; a
+// mismatch means either the peer rotated their key legitimately OR the
+// server is substituting keys (the §3(d)1 attack in docs/crypto-design.md).
+// The UI must hard-block on mismatch and only proceed after an explicit,
+// informed user override — which re-pins the new key (Signal's
+// "safety number changed" model).
+//
+// Pins live in IndexedDB keyed by `${myUsername}|${peerUsername}` so two
+// accounts used from the same browser keep independent trust stores.
+
+/**
+ * Compare a freshly fetched key against the local pin for (me, peer).
+ * First sighting pins automatically and returns {status:'first-use'}.
+ *
+ * @returns {{status:'first-use'|'match'|'mismatch',
+ *            pinnedKeyB64?: string, pinnedSince?: string}}
+ */
+export async function checkTofuPin(myUsername, peerUsername, fetchedKeyB64) {
+  const db  = await _openDB();
+  const key = `${myUsername}|${peerUsername}`;
+
+  const existing = await new Promise((resolve, reject) => {
+    const req = db.transaction(_PIN_STORE, 'readonly').objectStore(_PIN_STORE).get(key);
+    req.onsuccess = () => resolve(req.result ?? null);
+    req.onerror   = () => reject(req.error);
+  });
+
+  if (!existing) {
+    await new Promise((resolve, reject) => {
+      const tx = db.transaction(_PIN_STORE, 'readwrite');
+      tx.objectStore(_PIN_STORE).put(
+        { publicKeyB64: fetchedKeyB64, firstSeen: new Date().toISOString() }, key);
+      tx.oncomplete = () => resolve();
+      tx.onerror    = () => reject(tx.error);
+    });
+    return { status: 'first-use' };
+  }
+
+  if (existing.publicKeyB64 === fetchedKeyB64) return { status: 'match' };
+
+  return {
+    status: 'mismatch',
+    pinnedKeyB64: existing.publicKeyB64,
+    pinnedSince:  existing.firstSeen,
+  };
+}
+
+/**
+ * Replace the pin for (me, peer) — call ONLY after the user explicitly
+ * confirmed they trust the new key in the mismatch warning dialog.
+ */
+export async function overridePin(myUsername, peerUsername, newKeyB64) {
+  const db = await _openDB();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(_PIN_STORE, 'readwrite');
+    tx.objectStore(_PIN_STORE).put(
+      { publicKeyB64: newKeyB64, firstSeen: new Date().toISOString() },
+      `${myUsername}|${peerUsername}`);
+    tx.oncomplete = () => resolve();
+    tx.onerror    = () => reject(tx.error);
+  });
+}
+
+/**
+ * Human-comparable fingerprint of a public key: SHA-256 of the raw key
+ * bytes, hex, spaced in groups of 8 (like Signal safety numbers, users
+ * compare these out-of-band).
+ */
+export async function keyFingerprint(keyB64) {
+  const digest = await crypto.subtle.digest('SHA-256', b64ToBuffer(keyB64));
+  const hex = Array.from(new Uint8Array(digest))
+    .map(b => b.toString(16).padStart(2, '0')).join('');
+  return hex.match(/.{8}/g).join(' ');
+}
+
 // ---- Canonical file-context AAD ----------------------------------------------
 
 /**
@@ -227,10 +309,10 @@ async function _hpkeKeySchedule(dh1, dh2, ekPubRaw) {
 // ---- Public: encrypt / decrypt ----------------------------------------------
 
 /**
- * Encrypt a plaintext string using HPKE Mode_Auth.
+ * Encrypt raw bytes (a file) using HPKE Mode_Auth.
  * Produces output compatible with Python encapsulate() and the C++ client.
  *
- * @param {string}    plaintext             Message to encrypt.
+ * @param {Uint8Array|ArrayBuffer} plaintextBytes  File bytes to encrypt.
  * @param {string}    recipientPublicKeyB64 Recipient's 32-byte X25519 public key (base64).
  * @param {CryptoKey} senderPrivateKey      Sender's non-extractable X25519 private key
  *                                          (from loadPrivateKey()).
@@ -240,7 +322,7 @@ async function _hpkeKeySchedule(dh1, dh2, ekPubRaw) {
  * @returns {{ ciphertext: string, nonce: string, encryptedKey: string }}
  *   All base64. encryptedKey = 32-byte ephemeral X25519 public key.
  */
-export async function encryptMessage(plaintext, recipientPublicKeyB64, senderPrivateKey, aad = null) {
+export async function encryptFile(plaintextBytes, recipientPublicKeyB64, senderPrivateKey, aad = null) {
   const recipPub = await importPublicKey(recipientPublicKeyB64);
 
   // Fresh ephemeral key pair — private half used once then discarded
@@ -255,7 +337,7 @@ export async function encryptMessage(plaintext, recipientPublicKeyB64, senderPri
   const ct = await crypto.subtle.encrypt(
     { name: 'AES-GCM', iv: nonce, ...(aad ? { additionalData: aad } : {}) },
     aesKey,
-    new TextEncoder().encode(plaintext)
+    plaintextBytes instanceof Uint8Array ? plaintextBytes : new Uint8Array(plaintextBytes)
   );
 
   return {
@@ -265,14 +347,18 @@ export async function encryptMessage(plaintext, recipientPublicKeyB64, senderPri
   };
 }
 
+/** String convenience wrapper around encryptFile() (UTF-8 encodes first). */
+export async function encryptMessage(plaintext, recipientPublicKeyB64, senderPrivateKey, aad = null) {
+  return encryptFile(new TextEncoder().encode(plaintext),
+                     recipientPublicKeyB64, senderPrivateKey, aad);
+}
+
 /**
- * Decrypt a message using HPKE Mode_Auth.
- * Matches Python decapsulate(recip_priv, sender_pub, ciphertext, enc, info).
+ * Decrypt file bytes using HPKE Mode_Auth.
+ * Matches Python decapsulate(recip_priv, sender_pub, ciphertext, enc, info, aad).
  *
  * @param {string}    ciphertextB64      AES-256-GCM ciphertext_with_tag only
  *                                       (slice base64decode(storedBlob)[12:]).
- * @param {string}    _nonceB64          Unused — nonce is re-derived from HPKE key schedule.
- *                                       Kept for API consistency with the send path.
  * @param {string}    encryptedKeyB64    32-byte ephemeral X25519 public key (base64).
  * @param {CryptoKey} recipientPrivKey   Recipient's non-extractable X25519 private key.
  * @param {string}    senderPublicKeyB64 Sender's 32-byte X25519 public key (base64).
@@ -280,10 +366,10 @@ export async function encryptMessage(plaintext, recipientPublicKeyB64, senderPri
  *                                       time (null if none). Rebuild it locally with
  *                                       buildFileAad() — do not trust a server-supplied
  *                                       string verbatim; the tag check is the verifier.
- * @returns {string} Decrypted plaintext.
+ * @returns {Uint8Array} Decrypted file bytes, verified authentic.
  */
-export async function decryptMessage(
-  ciphertextB64, _nonceB64, encryptedKeyB64, recipientPrivKey, senderPublicKeyB64, aad = null
+export async function decryptFile(
+  ciphertextB64, encryptedKeyB64, recipientPrivKey, senderPublicKeyB64, aad = null
 ) {
   const ekPubRaw = new Uint8Array(b64ToBuffer(encryptedKeyB64));
   if (ekPubRaw.length !== EK_LEN) {
@@ -304,7 +390,20 @@ export async function decryptMessage(
     aesKey,
     b64ToBuffer(ciphertextB64)
   );
-  return new TextDecoder().decode(plain);
+  return new Uint8Array(plain);
+}
+
+/**
+ * String convenience wrapper around decryptFile() (UTF-8 decodes the result).
+ * The legacy _nonceB64 parameter is unused — the nonce is re-derived from the
+ * HPKE key schedule; kept for signature stability.
+ */
+export async function decryptMessage(
+  ciphertextB64, _nonceB64, encryptedKeyB64, recipientPrivKey, senderPublicKeyB64, aad = null
+) {
+  const bytes = await decryptFile(
+    ciphertextB64, encryptedKeyB64, recipientPrivKey, senderPublicKeyB64, aad);
+  return new TextDecoder().decode(bytes);
 }
 
 // ---- Hashing ----------------------------------------------------------------

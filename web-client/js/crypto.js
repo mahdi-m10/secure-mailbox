@@ -172,6 +172,28 @@ export async function migrateLocalStorageKey(username) {
   }
 }
 
+// ---- Canonical file-context AAD ----------------------------------------------
+
+/**
+ * Build the canonical associated-data bytes for a file transfer.
+ * Must byte-match backend.crypto.build_file_aad and the C++ build_file_aad:
+ *
+ *   smx:v1:sender={sender}:recipient={recipient}:filename={filename}
+ *
+ * Binding this into the AEAD means the server cannot relabel a stored
+ * ciphertext (e.g. swap the filename) without decryption failing.
+ * Usernames cannot contain ':' (validated server-side as [a-zA-Z0-9_.-]),
+ * and filename is the last field, so the encoding is unambiguous.
+ * A null/undefined filename canonicalises to the empty string.
+ *
+ * @returns {Uint8Array} UTF-8 bytes to pass as the aad parameter.
+ */
+export function buildFileAad(senderUsername, recipientUsername, filename) {
+  return new TextEncoder().encode(
+    `smx:v1:sender=${senderUsername}:recipient=${recipientUsername}:filename=${filename ?? ''}`
+  );
+}
+
 // ---- HPKE Mode_Auth key schedule --------------------------------------------
 
 /**
@@ -212,10 +234,13 @@ async function _hpkeKeySchedule(dh1, dh2, ekPubRaw) {
  * @param {string}    recipientPublicKeyB64 Recipient's 32-byte X25519 public key (base64).
  * @param {CryptoKey} senderPrivateKey      Sender's non-extractable X25519 private key
  *                                          (from loadPrivateKey()).
+ * @param {Uint8Array|null} aad             Optional associated data authenticated by the
+ *                                          AEAD (use buildFileAad()). The recipient must
+ *                                          supply the identical bytes or decryption fails.
  * @returns {{ ciphertext: string, nonce: string, encryptedKey: string }}
  *   All base64. encryptedKey = 32-byte ephemeral X25519 public key.
  */
-export async function encryptMessage(plaintext, recipientPublicKeyB64, senderPrivateKey) {
+export async function encryptMessage(plaintext, recipientPublicKeyB64, senderPrivateKey, aad = null) {
   const recipPub = await importPublicKey(recipientPublicKeyB64);
 
   // Fresh ephemeral key pair — private half used once then discarded
@@ -228,7 +253,9 @@ export async function encryptMessage(plaintext, recipientPublicKeyB64, senderPri
   const { aesKey, nonce } = await _hpkeKeySchedule(dh1, dh2, ekPubRaw);
 
   const ct = await crypto.subtle.encrypt(
-    { name: 'AES-GCM', iv: nonce }, aesKey, new TextEncoder().encode(plaintext)
+    { name: 'AES-GCM', iv: nonce, ...(aad ? { additionalData: aad } : {}) },
+    aesKey,
+    new TextEncoder().encode(plaintext)
   );
 
   return {
@@ -249,10 +276,14 @@ export async function encryptMessage(plaintext, recipientPublicKeyB64, senderPri
  * @param {string}    encryptedKeyB64    32-byte ephemeral X25519 public key (base64).
  * @param {CryptoKey} recipientPrivKey   Recipient's non-extractable X25519 private key.
  * @param {string}    senderPublicKeyB64 Sender's 32-byte X25519 public key (base64).
+ * @param {Uint8Array|null} aad          Must be identical to the aad passed at encrypt
+ *                                       time (null if none). Rebuild it locally with
+ *                                       buildFileAad() — do not trust a server-supplied
+ *                                       string verbatim; the tag check is the verifier.
  * @returns {string} Decrypted plaintext.
  */
 export async function decryptMessage(
-  ciphertextB64, _nonceB64, encryptedKeyB64, recipientPrivKey, senderPublicKeyB64
+  ciphertextB64, _nonceB64, encryptedKeyB64, recipientPrivKey, senderPublicKeyB64, aad = null
 ) {
   const ekPubRaw = new Uint8Array(b64ToBuffer(encryptedKeyB64));
   if (ekPubRaw.length !== EK_LEN) {
@@ -269,7 +300,9 @@ export async function decryptMessage(
   const { aesKey, nonce } = await _hpkeKeySchedule(dh1, dh2, ekPubRaw);
 
   const plain = await crypto.subtle.decrypt(
-    { name: 'AES-GCM', iv: nonce }, aesKey, b64ToBuffer(ciphertextB64)
+    { name: 'AES-GCM', iv: nonce, ...(aad ? { additionalData: aad } : {}) },
+    aesKey,
+    b64ToBuffer(ciphertextB64)
   );
   return new TextDecoder().decode(plain);
 }

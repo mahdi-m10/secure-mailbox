@@ -404,33 +404,49 @@ step, which this module examines orally.
 
 ---
 
-## 7. Context binding and the `associated_data` field — what is actually implemented
+## 7. Context binding and the `associated_data` field
 
-**Honest statement:** the API defines a canonical AAD string,
-`"v1:sender={id}:recipient={id}:msg={id}"`, which the server computes and
-returns with every download, and older docstrings describe it as bound into the
-AEAD. **It is not.** All three implementations call AES-GCM with **empty
-associated data** (`None` / `nullptr` / no `additionalData`). The string is
-currently metadata, not a cryptographic control, and this document supersedes
-any comment claiming otherwise.
+**Canonical AAD (current design):**
 
-What context binding *actually* exists comes from the key schedule:
+    smx:v1:sender={sender_username}:recipient={recipient_username}:filename={filename}
 
-- **Bound:** sender identity, recipient identity, and the specific
-  encapsulation (`dh2` binds both static keys; `salt = pkE` binds the
-  ephemeral). Hence no cross-pair replay, no re-attribution (§3(d)).
-- **Not bound:** the server-assigned file ID and the plaintext
-  subject/filename column. Concretely: a compromised server can re-deliver an
-  old Alice→Bob ciphertext under a fresh file ID with a different subject line
-  (§3(d)3) — a duplicate-with-relabelled-metadata attack, not a content forgery.
+UTF-8 bytes; single definition per stack (`backend.crypto.build_file_aad`,
+`crypto.js buildFileAad`, C++ `build_file_aad`). The sender builds it from
+values it knows at encrypt time and binds it as GCM associated data; the
+recipient rebuilds it locally from the download metadata and its own
+username. Contents rationale:
 
-**Remediation (planned, deliberately deferred):** wire real AAD into all three
-encrypt/decrypt paths in the same change-set, binding
-`{version, sender_id, recipient_id, file_id or content-commitment, filename}`.
-Deferred because (i) all three clients must change atomically or
-cross-decryption breaks, and (ii) the identifiers to bind are being renamed by
-the mailbox pivot — binding message-IDs today would be churn. Until then the
-design claims only key-schedule binding, which §3's matrix reflects.
+- **Usernames, not numeric IDs** — both parties know usernames at
+  encrypt/decrypt time; clients never learn their own numeric ID. Usernames
+  are immutable and validated `[a-zA-Z0-9_.-]` (no `:`), and filename is the
+  final field, so the encoding is unambiguous.
+- **Filename included** — this is the concrete gain over key-schedule-only
+  binding: the server stores the filename in plaintext, and without AAD it
+  could relabel a stored ciphertext undetectably. With it, a swapped
+  filename fails the recipient's tag check. (Verified by cross-implementation
+  tests: C++↔Python round-trips succeed with matching AAD and fail on a
+  relabelled filename, both directions.)
+- **File ID deliberately excluded** — it is server-assigned *after* upload,
+  so a client cannot bind it at encrypt time. Consequence: a compromised
+  server can still re-deliver an identical record as a duplicate (§3(d)3
+  stands); AAD closes relabelling, not duplication.
+
+The upload endpoint cross-checks a client-supplied `associated_data` against
+the canonical form (400 on mismatch) to catch construction bugs at upload
+time. This is a debugging aid, not the security control — the server cannot
+verify the AEAD binding (it has no key); the recipient's local tag
+verification is the enforcement point, so clients must **rebuild** the AAD
+locally rather than trusting the server-returned string.
+
+What the key schedule binds regardless of AAD: sender identity, recipient
+identity, and the specific encapsulation (`dh2` binds both static keys;
+`salt = pkE` binds the ephemeral) — no cross-pair replay, no re-attribution.
+
+**Status:** all three crypto layers accept and enforce AAD (optional
+parameter, default none, so pre-AAD ciphertexts remain decryptable); the
+server computes/validates the canonical form. The web and C++ *client call
+sites* bind it as part of the client rework (§9) — ciphertexts uploaded by
+the old clients carry no AAD.
 
 ---
 
@@ -449,8 +465,12 @@ design claims only key-schedule binding, which §3's matrix reflects.
    key with KDF parameters distinct from server-side login hashing);
    C++ = not persisted at all. Planned: Argon2id-derived key-wrap with its own
    salt/params, independent of the server-side login parameters.
-4. **AAD not enforced in the AEAD** (§7): same-pair replay under relabelled
-   metadata is possible for a compromised server.
+4. **AAD adoption incomplete** (§7): the crypto layers enforce AAD and the
+   canonical format is live server-side, but the web/C++ client call sites
+   bind it only from the client rework onward — files uploaded by the old
+   clients carry no AAD and remain relabel-able. Same-pair *duplication*
+   (not relabelling) remains possible regardless, since the file ID cannot
+   be bound at encrypt time.
 5. **Metadata exposure** (§3(c)): social graph, timing, sizes, and plaintext
    subject/filename are visible to the server. Filenames could be
    client-side-encrypted later; traffic analysis is out of scope.
@@ -484,7 +504,7 @@ design claims only key-schedule binding, which §3's matrix reflects.
 | Gap | Fix | When |
 |---|---|---|
 | §8.1 key pinning | TOFU pin store in each client (IndexedDB / local file), hard warning on fingerprint change | Client UI chunks of the mailbox pivot |
-| §8.4 AAD | Bind `{v1, sender, recipient, file-id, filename}` as real AEAD AAD in all three stacks atomically | Immediately after the `/files` API stabilises |
+| §8.4 AAD | ~~Crypto layers + canonical format~~ **done** (username/filename-based; file ID excluded — unbindable pre-upload). Remaining: client call sites bind AAD on upload/download | Client rework chunks |
 | §8.3 key-at-rest | Argon2id(passphrase, dedicated salt/params) → AES-256-GCM key-wrap of `sk`; C++ client gains encrypted key file | Dedicated chunk (planned #7) |
 | §8.6 upload cap | Enforced max upload size + documented limit | Files-router chunk |
 

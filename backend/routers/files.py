@@ -38,14 +38,23 @@ clients do not need to know the internal storage format.
 
 Canonical associated data (AAD)
 --------------------------------
-The server computes a canonical context string for every file:
+The canonical AAD for every file (see backend.crypto.build_file_aad):
 
-    "v1:sender={owner_id}:recipient={recipient_id}:file={file_id}"
+    "smx:v1:sender={owner_username}:recipient={recipient_username}:filename={filename}"
 
-and returns it in the download response.  NOTE: no client currently binds
-this string into the AEAD — context binding today comes from the HPKE key
-schedule only (see docs/crypto-design.md §7).  Binding it for real is a
-planned change tracked in the design document's remediation map.
+The sender builds it at encrypt time and binds it into the AEAD; the
+recipient rebuilds it from the download response and their own username.
+Binding the filename means a malicious server cannot relabel a stored
+ciphertext without the recipient's tag check failing.  The file ID is
+deliberately NOT included — it does not exist at encrypt time.
+
+The upload endpoint validates a client-supplied associated_data against the
+canonical value (400 on mismatch) to catch client-side construction bugs
+early; the security check is always the recipient's local one.
+
+Client status: the crypto layers in all three implementations accept AAD;
+the web and C++ clients start binding it when they are reworked for the
+/files API (tracked in docs/crypto-design.md §9).
 
 Upload size limits
 ------------------
@@ -73,6 +82,7 @@ from sqlalchemy.orm import Session, aliased
 from web3 import Web3
 
 from backend import models
+from backend.crypto import build_file_aad
 from backend.database import get_db
 from backend.dependencies import get_current_user
 from backend.schemas import (
@@ -124,16 +134,19 @@ def _unpack(stored_b64: str) -> tuple[str, str]:
 # Canonical associated data
 # ---------------------------------------------------------------------------
 
-def _canonical_aad(owner_id: int | None, recipient_id: int, file_id: int) -> str:
-    """Return the canonical context string for a (owner, recipient, file) triple.
+def _canonical_aad(
+    owner_username: str | None,
+    recipient_username: str,
+    filename: str | None,
+) -> str:
+    """Return the canonical AAD string for a (owner, recipient, filename) triple.
 
-    "sender"/"recipient" name the cryptographic roles: the owner encrypted
-    the file (HPKE sender), the recipient decrypts it.
-
-    Informational for now — not bound into any AEAD call (see the module
-    docstring and docs/crypto-design.md §7).
+    Delegates to backend.crypto.build_file_aad — the single definition of the
+    format — and decodes to str for JSON transport.  "sender"/"recipient" in
+    the string name the cryptographic roles: the owner encrypted the file
+    (HPKE sender), the recipient decrypts it.
     """
-    return f"v1:sender={owner_id}:recipient={recipient_id}:file={file_id}"
+    return build_file_aad(owner_username or "", recipient_username, filename).decode("utf-8")
 
 
 # ---------------------------------------------------------------------------
@@ -380,6 +393,27 @@ def upload_file(
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="You cannot upload a file to yourself.",
+        )
+
+    # ------------------------------------------------------------------
+    # 1b. Cross-check client-supplied associated_data (when present).
+    #     The client binds this string into the AEAD; the server cannot
+    #     verify the binding (it has no key), but it CAN verify the client
+    #     built the canonical string correctly — catching construction bugs
+    #     at upload time instead of as a confusing decrypt failure at the
+    #     recipient.  The authoritative check remains the recipient's local
+    #     GCM tag verification.
+    # ------------------------------------------------------------------
+    canonical = _canonical_aad(
+        current_user.username, body.recipient_username, body.filename
+    )
+    if body.associated_data is not None and body.associated_data != canonical:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=(
+                "associated_data does not match the canonical form "
+                f"'{canonical}'. Rebuild it with the documented format."
+            ),
         )
 
     # ------------------------------------------------------------------
@@ -902,21 +936,30 @@ def download_file(
         db.commit()
 
     # ------------------------------------------------------------------
-    # Canonical context string.
-    # For recipients: their ID is in the access row.
-    # For the owner reading their own file: use the owner's own ID as the
-    # recipient_id placeholder.  The owner should not normally decrypt
-    # files they uploaded (they already have the plaintext), but this
-    # allows self-audit without erroring.
-    # ------------------------------------------------------------------
-    recipient_id = access.recipient_id if access else current_user.id
-    aad = _canonical_aad(file_obj.owner_id, recipient_id, file_obj.id)
-
-    # ------------------------------------------------------------------
     # Resolve owner display name (single DB lookup; not in a join because
     # this endpoint returns one row, not a list).
     # ------------------------------------------------------------------
     owner = db.get(models.User, file_obj.owner_id) if file_obj.owner_id else None
+
+    # ------------------------------------------------------------------
+    # Canonical AAD string, rebuilt from stored metadata.
+    # The downloader IS the recipient in the normal case, so their own
+    # username goes in the recipient slot.  (When the owner self-downloads,
+    # the string is a placeholder — the owner cannot decrypt their own
+    # upload anyway, since the content key derives from the recipient's
+    # key pair.)
+    #
+    # SECURITY NOTE: a recipient must treat this field as advisory — the
+    # binding check happens when they build the AAD from the same response
+    # fields (owner_username, filename, own username) and the GCM tag
+    # verifies.  A server that tampers with filename here also breaks the
+    # tag, which is the point of binding it.
+    # ------------------------------------------------------------------
+    aad = _canonical_aad(
+        owner.username if owner else None,
+        current_user.username,
+        file_obj.filename,
+    )
 
     return {
         "id":              file_obj.id,

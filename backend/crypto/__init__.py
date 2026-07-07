@@ -29,6 +29,7 @@ HPKE Mode_Auth (DHKEM-X25519 + HKDF-SHA256 + AES-256-GCM):
   generate_keypair      — generate an X25519 static key pair (priv, pub)
   encapsulate           — authenticated hybrid encrypt; returns (ct, enc_key)
   decapsulate           — authenticated hybrid decrypt; raises ValueError on fail
+  build_file_aad        — canonical associated-data bytes for a file transfer
   HPKE_KEY_SIZE         — X25519 key size in bytes (32)
   HPKE_ENCAPSULATED_SIZE — encapsulated (ephemeral public) key size in bytes (32)
 """
@@ -58,6 +59,7 @@ from backend.crypto.hpke import (
     generate_keypair,
     encapsulate,
     decapsulate,
+    build_file_aad,
     KEY_SIZE   as HPKE_KEY_SIZE,
     ENCAPSULATED_KEY_SIZE as HPKE_ENCAPSULATED_SIZE,
 )
@@ -85,6 +87,7 @@ __all__ = [
     "generate_keypair",
     "encapsulate",
     "decapsulate",
+    "build_file_aad",
     "HPKE_KEY_SIZE",
     "HPKE_ENCAPSULATED_SIZE",
 ]

@@ -144,3 +144,54 @@ Design choices not explicitly specified in my direction:
 **Corrections / rejections:** none on the code content.
 
 ---
+
+## Entry 4 — AAD wiring in the crypto layers
+
+**What I asked for:**
+- Wire real associated data into the encrypt/decrypt paths (the gap
+  identified in the audit and documented in the design document §7), as the
+  next chunk after the /files API.
+
+**What was produced:**
+- `associated_data` parameters (optional, default none — pre-AAD ciphertexts
+  stay decryptable) on `encapsulate`/`decapsulate` in `backend/crypto/hpke.py`,
+  `encryptMessage`/`decryptMessage` in `web-client/js/crypto.js`, and
+  `hpke_encapsulate`/`hpke_decapsulate` in `cpp-client/src/main.cpp`.
+- A canonical AAD builder in each stack (single definition per language):
+  `smx:v1:sender={username}:recipient={username}:filename={filename}`.
+- Server: upload endpoint cross-checks client-supplied `associated_data`
+  against the canonical form (400 on mismatch); download returns the
+  canonical string rebuilt from stored metadata.
+- Tests: 9 new tests (AAD round-trip, relabelled-filename rejection,
+  missing-AAD rejection, backward compatibility, canonical format, endpoint
+  validation) — suite at 21 passing. Cross-implementation verification:
+  C++↔Python encrypt/decrypt with AAD succeeds in both directions and fails
+  on a relabelled filename in both directions (C++ client compiled and
+  exercised via a test harness). Web Crypto path not executable outside a
+  browser; exercised when the web client is reworked.
+- Design document §7/§8/§9 updated to the new state.
+
+Design choices not explicitly specified in my direction:
+- **DECISION — AAD contents `{v1, sender username, recipient username,
+  filename}`:** usernames rather than numeric IDs (clients know usernames,
+  never their own numeric ID); filename included because relabelling by the
+  server is the attack AAD actually closes; the server-assigned file ID
+  excluded because it does not exist at encrypt time — so server-side
+  duplication of a record remains possible and remains documented.
+- **DECISION — delimiter safety argument:** usernames cannot contain `:`
+  (server-validated charset) and filename is the final field, making the
+  canonical string unambiguous without escaping.
+- **DECISION — optional parameters, callers wired later:** AAD params default
+  to none so the change is non-breaking; the client call sites bind AAD when
+  they are reworked for the /files API (they are already incompatible with
+  the new paths, so binding activates with that rework).
+- **DECISION — server-side upload cross-check:** validating client-supplied
+  `associated_data` against the canonical form is a debugging aid to catch
+  construction bugs at upload time; the enforcement point remains the
+  recipient's local tag verification, and clients must rebuild the AAD
+  locally rather than trust the server's string.
+- **DECISION — null filename canonicalises to empty string** in the AAD.
+
+**Corrections / rejections:** none.
+
+---

@@ -146,6 +146,26 @@ static const std::vector<unsigned char> HPKE_INFO = {
     's','e','c','u','r','e','-','m','e','s','s','e','n','g','e','r'
 };
 
+// ── Canonical file-context AAD ────────────────────────────────────────────────
+//
+// Must byte-match Python's backend.crypto.build_file_aad and the web client's
+// buildFileAad:
+//
+//   smx:v1:sender={sender}:recipient={recipient}:filename={filename}
+//
+// Binding this into the AEAD means the server cannot relabel a stored
+// ciphertext (e.g. swap the filename) without decryption failing.  Usernames
+// cannot contain ':' (server-validated [a-zA-Z0-9_.-]) and filename is the
+// final field, so the encoding is unambiguous.  Empty filename is valid.
+std::string build_file_aad(const std::string& sender_username,
+                           const std::string& recipient_username,
+                           const std::string& filename)
+{
+    return "smx:v1:sender=" + sender_username +
+           ":recipient="    + recipient_username +
+           ":filename="     + filename;
+}
+
 // ── HPKE Mode_Auth ────────────────────────────────────────────────────────────
 
 struct EncryptedMessage {
@@ -158,8 +178,13 @@ struct EncryptedMessage {
 
 // Encrypt `plaintext` for `recipient_pub` in HPKE Mode_Auth.
 //
-// Mirrors Python's encapsulate(recipient_public_key, sender_private_key, plaintext, info).
-// The C++ and Python outputs are cross-decryptable as long as the same info string is used.
+// Mirrors Python's encapsulate(recipient_public_key, sender_private_key,
+// plaintext, info, associated_data).  The C++ and Python outputs are
+// cross-decryptable as long as the same info string AND aad are used.
+//
+// `aad` — optional associated data authenticated (not encrypted) by the AEAD;
+// build with build_file_aad().  Empty string means no AAD (matches Python
+// associated_data=None; libsodium treats ad=nullptr/adlen=0 identically).
 //
 // Requires AES-NI (or equivalent) hardware — check crypto_aead_aes256gcm_is_available()
 // before calling.
@@ -167,6 +192,7 @@ EncryptedMessage hpke_encapsulate(
     const std::string& plaintext,
     const std::vector<unsigned char>& recipient_pub,   // 32-byte X25519 public key
     const std::vector<unsigned char>& sender_priv,     // 32-byte X25519 private key
+    const std::string& aad = "",
     const std::vector<unsigned char>& info = HPKE_INFO)
 {
     if (recipient_pub.size() != 32)
@@ -206,15 +232,17 @@ EncryptedMessage hpke_encapsulate(
     std::vector<unsigned char> aes_key(okm.begin(),      okm.begin() + 32);
     std::vector<unsigned char> nonce  (okm.begin() + 32, okm.begin() + 44);
 
-    // 4. AES-256-GCM encrypt (matches Python's AESGCM(aes_key).encrypt(nonce, pt, None)).
+    // 4. AES-256-GCM encrypt (matches Python's AESGCM(aes_key).encrypt(nonce, pt, aad)).
     const auto* pt = reinterpret_cast<const unsigned char*>(plaintext.data());
+    const auto* ad = aad.empty() ? nullptr
+                                 : reinterpret_cast<const unsigned char*>(aad.data());
     std::vector<unsigned char> ct(plaintext.size() + crypto_aead_aes256gcm_ABYTES);
     unsigned long long ct_len = 0;
     crypto_aead_aes256gcm_encrypt(
         ct.data(), &ct_len,
         pt, plaintext.size(),
-        nullptr, 0,  // no associated data (matches Python's None)
-        nullptr,     // nsec — unused
+        ad, aad.size(),  // associated data — authenticated, not encrypted
+        nullptr,         // nsec — unused
         nonce.data(), aes_key.data());
     ct.resize(ct_len);
 
@@ -243,11 +271,16 @@ EncryptedMessage hpke_encapsulate(
 //
 // `enc_key_b64` is the 32-byte ephemeral public key (ek_pub) stored in the
 // `encrypted_key` field by the sender.
+//
+// `aad` must be identical to the value passed at encrypt time ("" if none).
+// Rebuild it locally with build_file_aad() from the download metadata — the
+// GCM tag check is what verifies the server did not relabel the file.
 std::optional<std::string> hpke_decapsulate(
     const std::string& ciphertext_blob_b64,
     const std::string& enc_key_b64,
     const std::vector<unsigned char>& recipient_priv,  // 32-byte private key
     const std::vector<unsigned char>& sender_pub,      // 32-byte static public key
+    const std::string& aad = "",
     const std::vector<unsigned char>& info = HPKE_INFO)
 {
     try {
@@ -293,11 +326,13 @@ std::optional<std::string> hpke_decapsulate(
         }
         std::vector<unsigned char> plaintext(ct.size() - crypto_aead_aes256gcm_ABYTES);
         unsigned long long pt_len = 0;
+        const auto* ad = aad.empty() ? nullptr
+                                     : reinterpret_cast<const unsigned char*>(aad.data());
         int rc = crypto_aead_aes256gcm_decrypt(
             plaintext.data(), &pt_len,
             nullptr,
             ct.data(), ct.size(),
-            nullptr, 0,
+            ad, aad.size(),
             nonce.data(), aes_key.data());
 
         sodium_memzero(dh1.data(),     dh1.size());

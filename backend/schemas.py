@@ -257,15 +257,18 @@ class FileUpload(BaseModel):
         description="Base64-encoded 12-byte (96-bit) AES-256-GCM nonce.",
     )
 
-    # The server computes a canonical AAD string and returns it in the
-    # download response.  NOTE: no client currently binds this string into
-    # the AEAD — context binding today comes from the HPKE key schedule only
-    # (see docs/crypto-design.md §7).  The field is informational.
+    # Canonical AAD the client bound into the AEAD:
+    #   "smx:v1:sender={sender_username}:recipient={recipient_username}:filename={filename}"
+    # Optional; when present the server cross-checks it against the canonical
+    # form built from this request (400 on mismatch) to catch client-side
+    # construction bugs at upload time.  The server cannot verify the actual
+    # AEAD binding — that check is the recipient's tag verification.
     associated_data: str | None = Field(
         default=None,
         description=(
-            "Informational context string. Not currently bound into the AEAD; "
-            "see docs/crypto-design.md §7."
+            "Canonical AAD string bound into the AEAD by the client. "
+            "Validated against the canonical form when present; see "
+            "backend.crypto.build_file_aad and docs/crypto-design.md §7."
         ),
     )
 

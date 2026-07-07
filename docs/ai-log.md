@@ -367,4 +367,13 @@ the old AAD format as "not bound into the AEAD") was corrected in the same
 chunk, along with the design-document sections (§3, §4.5, §7, §8, §9) that
 had fallen behind the implemented state.
 
+Follow-up in the same chunk, at my direction: `cpp-client/README.md` was
+rewritten immediately (pulled forward from the docs chunk) because it still
+described the pre-pivot scheme — ChaCha20-Poly1305 with `crypto_box_seal`,
+`Message`/`MessageStore`, a print-once unpersisted private key, and a false
+claim that the C++ client could not interoperate with the Python backend.
+The rewrite states the implemented scheme (HPKE Mode_Auth / AES-256-GCM,
+File/FileStore, KeyVault, TOFU pins, live AAD) and the verified cross-stack
+interoperability; I reviewed the full text before it was committed.
+
 ---

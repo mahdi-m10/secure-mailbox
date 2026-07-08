@@ -32,7 +32,9 @@
 import { API } from './config.js';
 import {
   buildFileAad, checkTofuPin, decryptFile, encryptFile, keyFingerprint,
-  loadPrivateKey, overridePin, b64ToBuffer, bufToB64,
+  overridePin, b64ToBuffer, bufToB64,
+  keyPairStatus, unlockKeyPair, saveWrappedKeyPair, generateKeyPair,
+  migrateLocalStorageKey,
 } from './crypto.js';
 
 const MAX_PLAINTEXT_BYTES = 8 * 1024 * 1024;   // mirror of the server-side cap
@@ -51,6 +53,12 @@ let sharedFiles = [];
 let ownedFiles  = [];
 let allUsers    = [];
 let activeTab   = 'shared';
+
+// The unlocked (non-extractable) private key for this page load, produced by
+// unlockKeyPair(). null = vault locked → every crypto verb is blocked.
+// CryptoKeys cannot be kept in sessionStorage; re-prompting per page load is
+// the intended behaviour.
+let sessionKey  = null;
 
 // ── Bootstrap ──────────────────────────────────────────────────────────────────
 
@@ -82,8 +90,13 @@ document.addEventListener('DOMContentLoaded', async () => {
 
   document.getElementById('upload-file-input').addEventListener('change', onFileChosen);
 
+  document.getElementById('vault-locked-banner').addEventListener('click', ensureVault);
+
   lucide.createIcons();
 
+  // Vault first: unlock / create / upgrade before anything encrypted is
+  // touchable. Listings load either way — browsing works with a locked vault.
+  await ensureVault();
   await Promise.all([loadUsers(), refreshLists()]);
 });
 
@@ -218,6 +231,174 @@ function handleAction(action, fileId, btn) {
 
 // ── TOFU gate ──────────────────────────────────────────────────────────────────
 
+// ── Key vault (passphrase-wrapped private key) ─────────────────────────────────
+//
+// The private key exists in IndexedDB only as an AES-GCM blob wrapped under a
+// PBKDF2-derived key (crypto.js). This block owns the page's vault lifecycle:
+//   wrapped → prompt passphrase, unwrapKey → non-extractable session key
+//   none    → create a vault (new passphrase; migrates a legacy localStorage
+//             JWK into the vault if one exists, preserving the key)
+//   legacy  → pre-vault non-extractable CryptoKey record: it CANNOT be
+//             wrapped retroactively, so it is replaced — new wrapped keypair,
+//             new public key uploaded, old record overwritten. Files
+//             encrypted to the old key become unreadable (told to the user).
+// There is no path that yields a usable key without the passphrase.
+
+function updateVaultUI() {
+  document.getElementById('vault-locked-banner').style.display =
+    sessionKey ? 'none' : 'flex';
+}
+
+/** The single gate every crypto verb goes through. */
+async function requireSessionKey() {
+  if (sessionKey) return sessionKey;
+  await ensureVault();                     // re-offer the modal
+  if (sessionKey) return sessionKey;
+  throw new Error('Key vault is locked — unlock it to encrypt or decrypt files.');
+}
+
+/** Show the vault modal in the right mode; resolves when the vault is
+ *  unlocked/created or the user skips (browse-only). */
+async function ensureVault() {
+  const me = getUsername();
+  const status = await keyPairStatus(me);
+  const hasLegacyJwk = !!localStorage.getItem(`sm_privkey_${me}`);
+
+  const mode = status === 'wrapped' ? 'unlock'
+             : status === 'legacy'  ? 'upgrade'
+             : hasLegacyJwk         ? 'migrate'
+             :                        'create';
+
+  const texts = {
+    unlock: {
+      title: 'Unlock your key vault',
+      explain: 'Enter your key-vault passphrase to decrypt files shared with ' +
+               'you and to upload new ones. This is the passphrase you set ' +
+               'when your encryption key was created — not your login password.',
+      button: 'Unlock', repeat: false,
+    },
+    create: {
+      title: 'Create your key vault',
+      explain: 'No encryption key exists for this account on this device. ' +
+               'Choose a key-vault passphrase (different from your login ' +
+               'password) — it encrypts your new private key on this device, ' +
+               'is never sent to the server, and cannot be recovered. ' +
+               'Files previously encrypted to a key from another device will ' +
+               'not be readable here.',
+      button: 'Create vault', repeat: true,
+    },
+    migrate: {
+      title: 'Protect your existing key',
+      explain: 'An encryption key from an older version of this app was found ' +
+               'on this device. Choose a key-vault passphrase (different from ' +
+               'your login password) to encrypt it at rest — your existing ' +
+               'files stay readable.',
+      button: 'Encrypt my key', repeat: true,
+    },
+    upgrade: {
+      title: 'Key upgrade required',
+      explain: 'Your encryption key predates passphrase protection and cannot ' +
+               'be upgraded in place (its bytes are sealed inside the browser ' +
+               'and cannot be re-encrypted). A NEW key will be generated and ' +
+               'stored passphrase-encrypted. Files encrypted to the old key ' +
+               'will no longer be readable — the sender must re-share them.',
+      button: 'Generate new key', repeat: true,
+    },
+  }[mode];
+
+  return new Promise(resolve => {
+    const modal   = document.getElementById('vault-modal');
+    const form    = document.getElementById('vault-form');
+    const pass1   = document.getElementById('vault-pass');
+    const pass2   = document.getElementById('vault-pass2');
+    const stat    = document.getElementById('vault-status');
+    const submit  = document.getElementById('vault-submit');
+
+    document.getElementById('vault-title-text').textContent = texts.title;
+    document.getElementById('vault-explain').textContent    = texts.explain;
+    document.getElementById('vault-pass2-group').style.display =
+      texts.repeat ? '' : 'none';
+    submit.textContent = texts.button;
+    pass1.value = ''; pass2.value = '';
+    stat.style.display = 'none';
+
+    let attemptsLeft = 3;   // unlock mode only
+
+    const close = () => {
+      modal.style.display = 'none';
+      form.onsubmit = null;
+      document.getElementById('vault-skip').onclick = null;
+      updateVaultUI();
+      resolve();
+    };
+
+    const fail = (msg) => {
+      stat.textContent = msg;
+      stat.className = 'alert alert-error';
+      stat.style.display = 'block';
+    };
+
+    document.getElementById('vault-skip').onclick = close;
+
+    form.onsubmit = async (e) => {
+      e.preventDefault();
+      const p1 = pass1.value, p2 = pass2.value;
+      if (p1.length < 8) return fail('Passphrase must be at least 8 characters.');
+      if (texts.repeat && p1 !== p2) return fail('Passphrases do not match.');
+
+      submit.disabled = true;
+      submit.innerHTML = '<span class="spinner"></span> Deriving key…';
+      try {
+        if (mode === 'unlock') {
+          const unlocked = await unlockKeyPair(me, p1);
+          if (!unlocked) {
+            attemptsLeft--;
+            if (attemptsLeft <= 0) {
+              toast('Vault locked — browsing only. Use the sidebar button to retry.');
+              return close();
+            }
+            return fail(`Wrong passphrase. ${attemptsLeft} attempt(s) left.`);
+          }
+          sessionKey = unlocked.privateKey;
+        } else if (mode === 'migrate') {
+          const ok = await migrateLocalStorageKey(me, p1);
+          if (!ok) return fail('Migration failed — the stored key is unusable. Reload to create a fresh key.');
+          sessionKey = (await unlockKeyPair(me, p1)).privateKey;
+          toast('Existing key encrypted into your new vault.');
+        } else {  // create | upgrade — fresh keypair, wrapped, public key published
+          const { publicKeyB64, privateKey } = await generateKeyPair();
+          await saveWrappedKeyPair(me, publicKeyB64, privateKey, p1);
+          // (the extractable reference goes out of scope here — only the
+          //  wrapped blob persists)
+          const res = await authFetch(`${API}/users/keys`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ public_key: publicKeyB64 }),
+          });
+          if (!res.ok) {
+            const body = await res.json().catch(() => ({}));
+            return fail(parseApiError(body, 'Could not publish your new public key.'));
+          }
+          // Round-trip through unwrapKey so the session key is the
+          // non-extractable form, same as every future unlock.
+          sessionKey = (await unlockKeyPair(me, p1)).privateKey;
+          toast(mode === 'upgrade' ? 'New key generated and vaulted.' : 'Key vault created.');
+        }
+        close();
+      } catch (err) {
+        fail(err.message ?? 'Vault operation failed.');
+      } finally {
+        submit.disabled = false;
+        submit.textContent = texts.button;
+      }
+    };
+
+    modal.style.display = 'flex';
+    lucide.createIcons();
+    pass1.focus();
+  });
+}
+
 /**
  * Fetch a peer's public key and enforce the TOFU pin.
  * - first sighting → pin silently + toast
@@ -318,8 +499,7 @@ async function handleUpload(e) {
 
   try {
     const me      = getUsername();
-    const privKey = await loadPrivateKey(me);
-    if (!privKey) throw new Error('No private key on this device. Sign out and back in to generate one.');
+    const privKey = await requireSessionKey();
 
     // TOFU-gated recipient key — encrypting to an unverified key is exactly
     // the MitM the pin store exists to catch.
@@ -379,8 +559,7 @@ async function fetchAndDecrypt(fileId) {
   if (!dl.owner_username)  throw new Error('Uploader identity unknown — cannot perform authenticated decryption.');
 
   const me      = getUsername();
-  const privKey = await loadPrivateKey(me);
-  if (!privKey) throw new Error('No private key on this device. Sign out and back in.');
+  const privKey = await requireSessionKey();
 
   // TOFU-gated owner (sender) key — Mode_Auth authenticates against it.
   const ownerKey = await getVerifiedPeerKey(dl.owner_username);
@@ -450,7 +629,7 @@ async function handleShare(fileId, btn) {
     // 2. TOFU-gated new-recipient key, then re-encrypt with an AAD naming
     //    US as the sender — the share creates a new file row owned by us.
     const recipientKey = await getVerifiedPeerKey(recipient);
-    const privKey      = await loadPrivateKey(me);
+    const privKey      = await requireSessionKey();
     const aadBytes     = buildFileAad(me, recipient, dl.filename ?? null);
     const { ciphertext, nonce, encryptedKey } =
       await encryptFile(bytes, recipientKey, privKey, aadBytes);
@@ -607,6 +786,7 @@ async function doLogout() {
       body:    JSON.stringify({ refresh_token: refresh }),
     }).catch(() => {});
   }
+  sessionKey = null;   // drop the unlocked key with the session
   clearSession();
   window.location.href = 'index.html';
 }
@@ -616,6 +796,25 @@ function clearSession() {
 }
 
 // ── Utilities ──────────────────────────────────────────────────────────────────
+
+/**
+ * FastAPI returns validation errors as
+ *   { detail: [ { loc, msg, type }, … ] }   (422)
+ * and plain errors as { detail: "string" }.  Pydantic v2 prefixes
+ * value_error messages with "Value error, " — strip it.
+ */
+function parseApiError(data, fallback) {
+  const { detail } = data ?? {};
+  if (!detail) return fallback;
+  if (typeof detail === 'string') return detail;
+  if (Array.isArray(detail) && detail.length > 0) {
+    return detail
+      .map(e => (e.msg ?? '').replace(/^Value error,\s*/i, ''))
+      .filter(Boolean)
+      .join(' ') || fallback;
+  }
+  return fallback;
+}
 
 function esc(s) {
   return String(s ?? '')

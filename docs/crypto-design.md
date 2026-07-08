@@ -250,12 +250,41 @@ the blockchain integrity anchor (separate subject; not a crypto control against
 the server, which computes it). Base64-in-SQLite is a deliberate simplicity
 trade-off with real limits — see §8.6.
 
-**Web client keys.** The X25519 private key is generated **non-extractable**
-(W3C Web Crypto [6]) and stored in IndexedDB. Script — including XSS-injected
-script — can *use* the key via `crypto.subtle` but can never read its bytes, so
-exfiltration for offline use is blocked; in-session abuse is not. **It is not
-additionally encrypted under a password-derived key**, which the brief asks for.
-Stated as a limitation (§8.3); remediation planned (§9).
+**Web client keys.** The X25519 private key is stored in IndexedDB **only in
+passphrase-wrapped form**: AES-256-GCM ciphertext produced by
+`crypto.subtle.wrapKey()` under a key derived from a user-chosen vault
+passphrase (required to differ from the login password) with
+**PBKDF2-HMAC-SHA256, 600 000 iterations** (OWASP minimum for this
+construction), random 16-byte salt, parameters stored in the record for
+future upgrades. A copied IndexedDB store is useless without the passphrase.
+
+The non-extractable/wrapping tension is resolved with the
+`wrapKey`/`unwrapKey` pair: the key is *generated* extractable, but the
+reference is transient — it goes straight into `wrapKey()`, whose
+export-and-encrypt happens inside the browser crypto engine (the raw bytes
+never appear in JS-visible memory), and is then dropped; only the wrapped
+blob is persisted. On unlock, `unwrapKey()` decrypts and imports in one
+engine-internal step, producing a **non-extractable** session key
+(`deriveBits` only) held in a page-scoped variable — so at rest the key is
+passphrase-encrypted AND at runtime XSS can still only use, never export,
+it. A wrong passphrase fails the GCM tag: unlock returns null, never a
+garbage key. There is no unwrapped storage path and no way to obtain a
+usable key without the passphrase; pre-vault records (whose non-extractable
+keys *cannot* be re-wrapped — extractability is fixed at creation) are
+replaced via an explicit key-upgrade flow, not grandfathered in.
+
+Honest residuals: (1) at the instant of generation the key object is
+extractable, so script already executing at that exact moment could export
+it — after `wrapKey()` returns, never again; (2) PBKDF2 is not memory-hard,
+so offline brute-force of a stolen store is cheaper than against Argon2id
+(§8.3 records why Argon2id was not used here). The KDF is distinct from the
+server-side login hashing by construction: different algorithm, different
+salt, different secret.
+
+KDF choice: PBKDF2 is the only password KDF native to Web Crypto; Argon2id
+would require shipping a third-party WASM build into a CSP-locked page with
+no build system — worse supply-chain exposure for a marginal gain at this
+threat level.
 
 **C++ client keys.** Persisted in a passphrase-encrypted **key vault**
 (`~/.securemailbox/<username>/vault.json`, mode 0600). The private key is
@@ -497,11 +526,15 @@ legacy data in tests — but no shipped call site passes empty AAD.
 2. **No forward secrecy / no post-compromise security** (§3(d)5) — accepted
    for scope; would require a ratchet or per-session ephemeral–ephemeral
    exchange, which asynchronous offline delivery complicates.
-3. **Private key at rest — web client only** (§4.5): the C++ client now
-   satisfies the requirement (Argon2id-derived key-wrap vault with its own
-   salt and parameters, distinct from server-side login hashing). The web
-   client's key remains non-extractable but **not** password-wrapped, which
-   brief item 3c asks for; planned as its own chunk (§9).
+3. **Private key at rest — closed in both clients** (§4.5). C++: Argon2id →
+   XSalsa20-Poly1305 vault. Web: PBKDF2-HMAC-SHA256 (600k) →
+   AES-256-GCM `wrapKey`, non-extractable on unlock. Residuals, stated
+   precisely: the web KDF is PBKDF2, not memory-hard — GPU brute-force of a
+   stolen IndexedDB store is cheaper than against Argon2id (mitigated by a
+   mandatory separate passphrase; Argon2id rejected to avoid third-party
+   WASM crypto in a CSP-locked page); and the web key is briefly extractable
+   at generation time (see §4.5). Both derivations use salts/parameters
+   distinct from server-side login hashing, per brief item 3c.
 4. **AAD closes relabelling, not duplication** (§7): enforcement is live at
    every call site in both shipped clients. Same-pair *duplication* remains
    possible regardless, since the server-assigned file ID cannot be bound at
@@ -525,10 +558,11 @@ legacy data in tests — but no shipped call site passes empty AAD.
 9. **Dead code honesty:** `backend/crypto/kdf.py` (generic `derive_key` +
    `INFO_*` domain-separation constants) and `backend/crypto/aead.py`
    (standalone AES-GCM helpers with random nonces) are reference modules —
-   **no production path calls them**. The live path is `hpke.py` +
-   `crypto.js` + `main.cpp` only. They will either be wired in (the key-wrap
-   work in limitation 3 is the natural consumer, with distinct `info` strings)
-   or clearly marked as illustrative.
+   **no production path calls them**. The live paths are `hpke.py`,
+   `crypto.js`, and the C++ `Crypto.cpp` only. The key-wrap work (limitation
+   3) once looked like their natural consumer but landed entirely
+   client-side (Web Crypto / libsodium), so they remain dead; they will be
+   clearly marked as illustrative or removed in the docs cleanup.
 10. **Denial of service:** rate limiting exists on login only; upload
     endpoints need size caps + rate limits (networks/pentest work item, noted
     here for completeness).
@@ -541,7 +575,7 @@ legacy data in tests — but no shipped call site passes empty AAD.
 |---|---|---|
 | §8.1 key pinning | **Done — both clients.** TOFU pin store (web: IndexedDB; C++: per-account pin file), hard block + fingerprint display on change, explicit override re-pins. Residual: first-contact trust (inherent to TOFU; blockchain registry would strengthen) | Web + C++ rework chunks (landed) |
 | §8.4 AAD | **Done — enforcement live at every call site in both clients** (canonical username/filename form; file ID excluded — unbindable pre-upload; no AAD-less fallback). Residual: same-pair duplication | Web + C++ rework chunks (landed) |
-| §8.3 key-at-rest | **C++ done**: Argon2id(passphrase, dedicated salt/params) → XSalsa20-Poly1305 key-wrap vault (secretbox chosen over AES-GCM so the vault opens without AES-NI). **Web remaining**: passphrase wrap of the IndexedDB key | Dedicated chunk (planned #7, web) |
+| §8.3 key-at-rest | **Done — both clients.** C++: Argon2id(passphrase, dedicated salt/params) → XSalsa20-Poly1305 key-wrap vault (secretbox chosen over AES-GCM so the vault opens without AES-NI). Web: PBKDF2-HMAC-SHA256 (600k, dedicated salt) → AES-256-GCM via `wrapKey`/`unwrapKey`; session key non-extractable; legacy keys replaced via upgrade flow. Residual: PBKDF2 not memory-hard (§8.3) | C++ + web key-vault chunks (landed) |
 | §8.6 upload cap | Enforced max upload size + documented limit | Files-router chunk |
 
 ---

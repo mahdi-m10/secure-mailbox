@@ -69,6 +69,25 @@
                  autocomplete="new-password"
                  minlength="8" maxlength="128" required>
         </div>
+        <div class="form-group">
+          <label for="reg-vault-pass">Key-vault passphrase</label>
+          <input id="reg-vault-pass" type="password"
+                 placeholder="Different from your password — protects your encryption key"
+                 autocomplete="new-password"
+                 minlength="8" maxlength="128" required>
+          <small style="color:var(--text-muted,#888);display:block;margin-top:4px">
+            Encrypts your private key on this device. It is never sent to the
+            server and cannot be recovered — losing it means losing access to
+            files encrypted for you.
+          </small>
+        </div>
+        <div class="form-group">
+          <label for="reg-vault-pass2">Repeat key-vault passphrase</label>
+          <input id="reg-vault-pass2" type="password"
+                 placeholder="Repeat the passphrase"
+                 autocomplete="new-password"
+                 minlength="8" maxlength="128" required>
+        </div>
         <div id="register-status" class="alert" style="display:none"></div>
         <button type="submit" class="btn btn-primary btn-full">Create Account</button>
       </form>

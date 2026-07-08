@@ -377,3 +377,99 @@ File/FileStore, KeyVault, TOFU pins, live AAD) and the verified cross-stack
 interoperability; I reviewed the full text before it was committed.
 
 ---
+
+## Entry 7 — Web client key vault: passphrase-wrapped private key at rest
+
+**What I asked for:**
+- Close the last §8.3/§9 item: encrypt the web client's private key at rest
+  under a key derived from a user secret (a vault passphrase separate from
+  the login password), with KDF parameters distinct from server-side login
+  hashing — prompting at generation and requiring unlock before any
+  encrypt/decrypt.
+- A clear, up-front resolution of the tension with Web Crypto's
+  non-extractable keys (a non-extractable CryptoKey's bytes cannot be read
+  out for wrapping), explainable at interview.
+- The same no-fallback rule as everywhere else: no path that operates with
+  an unwrapped/unprotected key.
+- I reviewed the plan first and confirmed two flagged decisions before
+  implementation: PBKDF2 over Argon2id-via-WASM, and the legacy-key
+  replacement path (no test data needing preservation).
+
+**What was produced:**
+- `crypto.js`: `deriveWrappingKey` (PBKDF2-HMAC-SHA256, 600k iterations,
+  random 16-byte salt, params stored per record), `saveWrappedKeyPair`
+  (AES-256-GCM via `crypto.subtle.wrapKey`), `unlockKeyPair` (via
+  `unwrapKey`, wrong passphrase → null), `keyPairStatus`
+  ('wrapped'/'legacy'/'none'), `deleteKeyPair`;
+  `migrateLocalStorageKey(username, passphrase)` now wraps the legacy JWK
+  into the vault (same key — old files stay readable). The legacy
+  `saveKeyPair`/`loadPrivateKey`/`hasKeyPair` functions are deleted — the
+  passphrase path is the only way to a usable key.
+- The non-extractable/wrapping resolution: generate extractable but
+  transient → `wrapKey()` exports-and-encrypts inside the crypto engine
+  (raw bytes never in JS-visible memory) → drop the reference; unlock via
+  `unwrapKey()` which decrypts-and-imports in one engine step, yielding a
+  NON-extractable session key. Both properties hold at once: at rest the
+  key is passphrase-encrypted, at runtime XSS can use but never export it.
+- Registration (`index.html`/`auth.js`): two vault-passphrase fields
+  (min 8, must match, must differ from the login password); the vault is
+  written before the account is registered, and deleted again if
+  registration fails. Login no longer touches keys.
+- `files.html`/`files.js`: vault modal owning the whole lifecycle — unlock
+  (3 attempts then browse-only, sidebar banner to retry), create, migrate
+  (legacy localStorage JWK → wrapped, key preserved), upgrade (pre-vault
+  IndexedDB record: new keypair generated + published, old record
+  overwritten, data-loss consequence stated in the dialog). All crypto verbs
+  gate through one `requireSessionKey()` chokepoint; the unlocked key lives
+  in a page-scoped variable, dropped on logout.
+- Docs: §4.5 rewritten (wrap lifecycle, generation-window residual, KDF
+  rationale), §8.3 marked closed for both clients with residuals stated,
+  §9 row updated, §8.9 dead-code note corrected (the key-wrap work landed
+  client-side, so `kdf.py`/`aead.py` remain dead).
+- Verification (production `crypto.js` under Node 22 Web Crypto with an
+  in-memory IndexedDB shim): wrap→unlock round-trip with the session key
+  confirmed non-extractable (`exportKey` rejects); wrong passphrase returns
+  null; the stored record contains only ciphertext + KDF params (stolen-
+  store simulation); the unlocked key interops with the Python backend in
+  both directions with AAD, including relabelled-filename rejection;
+  legacy-record detection; localStorage-JWK migration preserves the key
+  (pre-migration ciphertext still decrypts). All JS syntax-checked; backend
+  suite 21/21.
+
+Design choices not explicitly specified in my direction:
+- **DECISION — `wrapKey`/`unwrapKey` rather than export→encrypt→import:**
+  functionally similar, but the wrap pair keeps the export and the decrypt
+  inside the browser crypto engine, so the private key bytes never appear
+  in JS-visible memory even transiently during wrap/unlock — the manual
+  route would expose them in an ArrayBuffer at both points.
+- **DECISION — PBKDF2-HMAC-SHA256 at 600 000 iterations** (confirmed by me
+  from the plan): the only password KDF native to Web Crypto; vendoring a
+  WASM Argon2 build into a no-build-system, CSP-locked page is worse
+  supply-chain exposure than the memory-hardness gain justifies here.
+  Distinctness from server-side Argon2id login hashing holds by
+  construction (different algorithm, salt, and secret). The honest cost —
+  PBKDF2 is not memory-hard — is recorded in §8.3.
+- **DECISION — wrapping key usages restricted to `wrapKey`/`unwrapKey`**:
+  the PBKDF2-derived key cannot encrypt arbitrary data, so no other code
+  path can repurpose it.
+- **DECISION — vault-before-register ordering** with cleanup on failure: if
+  wrapping fails there is no account; if registration fails the orphan
+  vault record is deleted.
+- **DECISION — unlock once per page load**, session key in a module
+  variable (CryptoKeys cannot be placed in sessionStorage); reload
+  re-prompts; logout nulls the reference.
+- **DECISION — after create/upgrade the session key is obtained by
+  round-tripping through `unlockKeyPair()`** rather than keeping the
+  just-generated extractable reference — the session always holds the
+  non-extractable form, and every vault write is immediately proven
+  unlockable.
+- A pre-existing chunk-5 bug found while wiring the modal: `files.js`
+  called `parseApiError()` on its upload/share error paths but never
+  defined or imported it (a 422 would have thrown a ReferenceError instead
+  of showing the message). Fixed by adding the helper to `files.js`.
+
+**Corrections / rejections:** none yet (pending review of this chunk).
+
+---
+
+---

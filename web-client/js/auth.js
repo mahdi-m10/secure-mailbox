@@ -2,15 +2,19 @@
  * auth.js — Login and registration logic for index.html
  *
  * Key-management strategy:
- *   - On register: generate X25519 key pair, store the private key as a
- *     non-extractable CryptoKey in IndexedDB, upload public key to the server.
- *   - On login: ensure IndexedDB holds a key for this device; migrate any legacy
- *     localStorage JWK first, otherwise generate a fresh pair and upload it.
- *   - Private key NEVER leaves the browser crypto engine or transits the network.
+ *   - On register: prompt for a key-vault passphrase (distinct from the
+ *     login password), generate an X25519 key pair, and store the private
+ *     key ONLY passphrase-wrapped (crypto.js saveWrappedKeyPair) before
+ *     registering the account with its public key.
+ *   - On login: no key work here — files.html owns the vault lifecycle
+ *     (unlock / create / legacy upgrade) and prompts for the passphrase
+ *     before any encrypt/decrypt can run.
+ *   - The private key never leaves the browser crypto engine or transits
+ *     the network, and is never stored unwrapped.
  */
 
 import { API } from './config.js';
-import { generateKeyPair, saveKeyPair, hasKeyPair, migrateLocalStorageKey } from './crypto.js';
+import { generateKeyPair, saveWrappedKeyPair, deleteKeyPair } from './crypto.js';
 
 // ---------- Session helpers ---------------------------------------------------
 
@@ -51,29 +55,47 @@ async function handleRegister(e) {
   const btn    = form.querySelector('[type="submit"]');
   const status = document.getElementById('register-status');
 
-  const username = form.querySelector('#reg-username').value.trim();
-  const email    = form.querySelector('#reg-email').value.trim();
-  const password = form.querySelector('#reg-password').value;
+  const username  = form.querySelector('#reg-username').value.trim();
+  const email     = form.querySelector('#reg-email').value.trim();
+  const password  = form.querySelector('#reg-password').value;
+  const vaultPass = form.querySelector('#reg-vault-pass').value;
+  const vaultRep  = form.querySelector('#reg-vault-pass2').value;
 
   clearStatus(status);
+
+  // Vault passphrase rules: it protects the private key AT REST, so it must
+  // not equal the login password (which the server sees at login and which
+  // an attacker tries first).
+  if (vaultPass.length < 8)     return setStatus(status, 'Key-vault passphrase must be at least 8 characters.', 'error');
+  if (vaultPass !== vaultRep)   return setStatus(status, 'Key-vault passphrases do not match.', 'error');
+  if (vaultPass === password)   return setStatus(status, 'The key-vault passphrase must be different from your login password.', 'error');
+
   btn.disabled = true;
   btn.innerHTML = '<span class="spinner"></span> Generating keys…';
 
   try {
     const { publicKeyB64, privateKey } = await generateKeyPair();
 
+    // Wrap-and-store BEFORE registering: if wrapping fails we abort with no
+    // account created, rather than an account whose key was never persisted.
+    // The extractable reference is dropped when this scope exits — only the
+    // wrapped form is stored.
+    btn.innerHTML = '<span class="spinner"></span> Encrypting key vault…';
+    await saveWrappedKeyPair(username, publicKeyB64, privateKey, vaultPass);
+
+    btn.innerHTML = '<span class="spinner"></span> Creating account…';
     const res  = await fetch(`${API}/auth/register`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ username, email, password, public_key: publicKeyB64 }),
     });
     const data = await res.json();
-    if (!res.ok) throw new Error(parseApiError(data, 'Registration failed.'));
-
-    // Store the non-extractable private key in IndexedDB.
-    // Key bytes are permanently inaccessible to JavaScript — XSS can use the
-    // key this session but cannot read or exfiltrate the raw material.
-    await saveKeyPair(username, publicKeyB64, privateKey);
+    if (!res.ok) {
+      // Don't leave an orphan vault behind for an account that was never
+      // created (e.g. username taken).
+      await deleteKeyPair(username).catch(() => {});
+      throw new Error(parseApiError(data, 'Registration failed.'));
+    }
 
     setStatus(status, 'Account created. You can now sign in.', 'success');
     form.reset();
@@ -116,42 +138,9 @@ async function handleLogin(e) {
 
     saveSession(data.access_token, data.refresh_token, username);
 
-    // Ensure a non-extractable X25519 private key is available in IndexedDB.
-    if (!(await hasKeyPair(username))) {
-      btn.innerHTML = '<span class="spinner"></span> Setting up encryption keys…';
-
-      // First, try migrating a legacy JWK left in localStorage by an older build.
-      // migrateLocalStorageKey() always clears localStorage on exit whether it
-      // succeeds or not, so legacy key material is never left behind.
-      const migrated = await migrateLocalStorageKey(username);
-
-      if (!migrated) {
-        // Nothing to migrate — generate a fresh key pair and publish the public key.
-        // Note: messages encrypted to any previous public key will no longer be
-        // decryptable on this device (expected behaviour for a new device / key loss).
-        const { publicKeyB64, privateKey } = await generateKeyPair();
-        await saveKeyPair(username, publicKeyB64, privateKey);
-
-        const keyRes = await fetch(`${API}/users/keys`, {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'Authorization': `Bearer ${data.access_token}`,
-          },
-          body: JSON.stringify({ public_key: publicKeyB64 }),
-        });
-        if (!keyRes.ok) {
-          const err = await keyRes.json().catch(() => ({}));
-          throw new Error(err.detail ?? 'Failed to register your public key. Please try again.');
-        }
-      }
-    } else {
-      // Key already in IndexedDB — remove any co-existing legacy JWK from localStorage
-      // so extractable key material does not linger after a partial migration.
-      localStorage.removeItem(`sm_privkey_${username}`);
-      localStorage.removeItem(`sm_pubkey_${username}`);
-    }
-
+    // All key-vault work (unlock / create / legacy upgrade / localStorage
+    // migration) happens on files.html, which prompts for the vault
+    // passphrase before any encrypt/decrypt operation is possible.
     window.location.href = 'files.html';
 
   } catch (err) {

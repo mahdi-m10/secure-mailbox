@@ -45,8 +45,8 @@ from backend.database import get_db
 from backend.dependencies import create_access_token, get_current_user
 from backend.limiter import limiter
 from backend.schemas import (
+    DetailResponse,
     LogoutRequest,
-    MessageOut,
     PasswordChange,
     Token,
     UserCreate,
@@ -314,7 +314,7 @@ def login(
 
 @router.post(
     "/logout",
-    response_model=MessageOut,
+    response_model=DetailResponse,
     status_code=status.HTTP_200_OK,
     summary="Invalidate the current session",
     responses={
@@ -326,7 +326,7 @@ def logout(
     body: LogoutRequest,
     current_user: models.User = Depends(get_current_user),
     db: Session = Depends(get_db),
-) -> MessageOut:
+) -> DetailResponse:
     """Invalidate the session tied to the provided refresh token.
 
     Requires **both**:
@@ -356,7 +356,7 @@ def logout(
     db.add(session)
     db.commit()
 
-    return MessageOut(detail="Logged out successfully.")
+    return DetailResponse(detail="Logged out successfully.")
 
 
 # ---------------------------------------------------------------------------
@@ -365,7 +365,7 @@ def logout(
 
 @router.put(
     "/password",
-    response_model=MessageOut,
+    response_model=DetailResponse,
     status_code=status.HTTP_200_OK,
     summary="Change the authenticated user's password",
     responses={
@@ -378,7 +378,7 @@ def change_password(
     body: PasswordChange,
     current_user: models.User = Depends(get_current_user),
     db: Session = Depends(get_db),
-) -> MessageOut:
+) -> DetailResponse:
     """Change the current user's password.
 
     **Requires (in addition to `Authorization: Bearer`):**
@@ -437,6 +437,6 @@ def change_password(
 
     db.commit()
 
-    return MessageOut(
+    return DetailResponse(
         detail="Password updated successfully. Please log in again on all devices."
     )

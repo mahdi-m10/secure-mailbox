@@ -233,6 +233,44 @@ def _derive_key_and_nonce(
 
 
 # ---------------------------------------------------------------------------
+# Canonical file-context AAD
+# ---------------------------------------------------------------------------
+
+def build_file_aad(
+    sender_username: str,
+    recipient_username: str,
+    filename: str | None,
+) -> bytes:
+    """Return the canonical associated-data bytes for a file transfer.
+
+    Format (UTF-8)::
+
+        smx:v1:sender={sender}:recipient={recipient}:filename={filename}
+
+    Both the sender (at encrypt time) and the recipient (at decrypt time)
+    must build this string from their own knowledge of the transfer and
+    pass it as ``associated_data``.  Binding these values into the GCM tag
+    means a malicious server cannot relabel a stored ciphertext (e.g. swap
+    the filename) without the recipient's decryption failing.
+
+    Encoding safety: usernames are validated as ``[a-zA-Z0-9_.-]{3,64}``
+    (no colons possible), and filename is the final field, so the string
+    cannot be made ambiguous by crafted input.  A null filename is
+    canonicalised to the empty string — the same value the upload stores.
+
+    Deliberately NOT included: the server-assigned file ID (it does not
+    exist at encrypt time, so a client cannot bind it) — which is why a
+    compromised server can still re-deliver an identical record as a
+    duplicate; see docs/crypto-design.md §3(d)3.
+    """
+    return (
+        f"smx:v1:sender={sender_username}"
+        f":recipient={recipient_username}"
+        f":filename={filename or ''}"
+    ).encode("utf-8")
+
+
+# ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
 
@@ -268,6 +306,7 @@ def encapsulate(
     sender_private_key: bytes,
     plaintext: bytes,
     info: bytes = b"secure-messenger",
+    associated_data: bytes | None = None,
 ) -> tuple[bytes, bytes]:
     """Encrypt *plaintext* for *recipient_public_key* in HPKE Mode_Auth.
 
@@ -303,6 +342,15 @@ def encapsulate(
         default ``b"secure-messenger"`` domain-separates this application
         from any other system that might use the same key pairs.  Change
         this if you need to produce keys for a different protocol context.
+    associated_data:
+        Optional bytes authenticated (but not encrypted) by the AEAD.  The
+        recipient must supply the identical value to decapsulate() or the
+        GCM tag check fails.  Use this to bind plaintext-visible metadata
+        (e.g. the canonical file context string — sender username,
+        recipient username, filename) so a malicious server cannot relabel
+        a ciphertext undetectably.  ``None`` means no associated data
+        (interoperable with ciphertexts produced before this parameter
+        existed).
 
     Returns
     -------
@@ -374,11 +422,12 @@ def encapsulate(
     # ------------------------------------------------------------------
     # Symmetric encryption with AES-256-GCM.
     # The 16-byte authentication tag is appended to the ciphertext by the
-    # library.  associated_data is None — context binding is already
-    # provided by the info string in the HKDF step, which is stronger
-    # (it binds the key itself, not just the ciphertext).
+    # library.  The key schedule (info + dh2 + salt=enc) binds the key to
+    # the sender/recipient key pairs; associated_data additionally binds
+    # plaintext-visible metadata (filename etc.) into the tag so the
+    # server cannot relabel the ciphertext without detection.
     # ------------------------------------------------------------------
-    ciphertext = AESGCM(aes_key).encrypt(nonce, plaintext, None)
+    ciphertext = AESGCM(aes_key).encrypt(nonce, plaintext, associated_data)
 
     # Return nonce alongside ciphertext and the encapsulated key so callers
     # that submit to the messages API (which requires a separate nonce field)
@@ -394,6 +443,7 @@ def decapsulate(
     ciphertext: bytes,
     encapsulated_key: bytes,
     info: bytes = b"secure-messenger",
+    associated_data: bytes | None = None,
 ) -> bytes:
     """Decrypt *ciphertext* and verify sender identity in HPKE Mode_Auth.
 
@@ -440,6 +490,11 @@ def decapsulate(
         Must exactly match the value passed to :func:`encapsulate`.  Even a
         single byte difference produces a completely different (aes_key,
         nonce) pair and causes decryption to fail.
+    associated_data:
+        Must exactly match the value passed to :func:`encapsulate`
+        (``None`` if none was passed).  A mismatch — e.g. the server
+        returned a different filename than the one the sender bound —
+        causes the GCM tag check to fail.
 
     Returns
     -------
@@ -501,10 +556,11 @@ def decapsulate(
     # would help an attacker understand which check failed.
     # ------------------------------------------------------------------
     try:
-        return AESGCM(aes_key).decrypt(nonce, ciphertext, None)
+        return AESGCM(aes_key).decrypt(nonce, ciphertext, associated_data)
     except InvalidTag:
         raise ValueError(
             "Decryption failed: authentication tag mismatch. "
             "The ciphertext was tampered with, or the sender key, "
-            "recipient key, encapsulated key, or info string is incorrect."
+            "recipient key, encapsulated key, info string, or "
+            "associated data is incorrect."
         )

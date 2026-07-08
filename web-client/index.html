@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>SecureMsg — Sign In</title>
+  <title>SecureMailbox — Sign In</title>
   <link rel="stylesheet" href="css/style.css">
 </head>
 <body class="auth-page">
@@ -15,9 +15,9 @@
         <div class="logo-icon">
           <i data-lucide="lock-keyhole"></i>
         </div>
-        <h1>SecureMsg</h1>
+        <h1>SecureMailbox</h1>
       </div>
-      <p>End-to-end encrypted messaging</p>
+      <p>End-to-end encrypted file sharing</p>
     </div>
 
     <div class="auth-tabs">
@@ -66,6 +66,25 @@
           <label for="reg-password">Password</label>
           <input id="reg-password" type="password"
                  placeholder="At least 8 characters"
+                 autocomplete="new-password"
+                 minlength="8" maxlength="128" required>
+        </div>
+        <div class="form-group">
+          <label for="reg-vault-pass">Key-vault passphrase</label>
+          <input id="reg-vault-pass" type="password"
+                 placeholder="Different from your password — protects your encryption key"
+                 autocomplete="new-password"
+                 minlength="8" maxlength="128" required>
+          <small style="color:var(--text-muted,#888);display:block;margin-top:4px">
+            Encrypts your private key on this device. It is never sent to the
+            server and cannot be recovered — losing it means losing access to
+            files encrypted for you.
+          </small>
+        </div>
+        <div class="form-group">
+          <label for="reg-vault-pass2">Repeat key-vault passphrase</label>
+          <input id="reg-vault-pass2" type="password"
+                 placeholder="Repeat the passphrase"
                  autocomplete="new-password"
                  minlength="8" maxlength="128" required>
         </div>

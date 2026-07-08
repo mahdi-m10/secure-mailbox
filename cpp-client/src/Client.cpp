@@ -28,16 +28,21 @@ static void print_error(long code, const std::string& body) {
     std::cerr << body << "\n";
 }
 
-static Message parse_message_item(const json& j) {
-    return Message{
-        j.at("id").get<int>(),
-        opt<int>(j, "sender_id"),
-        opt<std::string>(j, "sender_username"),
-        opt<std::string>(j, "subject"),
-        j.at("is_read").get<bool>(),
-        j.at("is_deleted").get<bool>(),
-        j.at("created_at").get<std::string>()
-    };
+static File parse_file_item(const json& j) {
+    File::Fields f;
+    f.id                 = j.at("id").get<int>();
+    f.owner_id           = opt<int>(j, "owner_id");
+    f.owner_username     = opt<std::string>(j, "owner_username");
+    f.recipient_username = opt<std::string>(j, "recipient_username");
+    f.subject            = opt<std::string>(j, "subject");
+    f.filename           = opt<std::string>(j, "filename");
+    f.content_type       = opt<std::string>(j, "content_type");
+    f.size_bytes         = opt<std::int64_t>(j, "size_bytes");
+    f.is_read            = j.at("is_read").get<bool>();
+    f.is_deleted         = j.value("is_deleted", false);   // absent in download responses
+    f.is_forwarded       = opt<bool>(j, "is_forwarded");
+    f.created_at         = j.at("created_at").get<std::string>();
+    return File{std::move(f)};
 }
 
 // ── libcurl write callback ────────────────────────────────────────────────────
@@ -48,7 +53,7 @@ size_t Client::write_callback(char* ptr, size_t size, size_t nmemb, void* userda
     return size * nmemb;
 }
 
-// ── Constructor / destructor ──────────────────────────────────────────────────
+// ── Constructor ───────────────────────────────────────────────────────────────
 
 Client::Client(ClientConfig config)
     : config_{std::move(config)}
@@ -244,74 +249,66 @@ bool Client::upload_public_key(const std::string& public_key_b64) {
     return true;
 }
 
-// ── Messages ──────────────────────────────────────────────────────────────────
+// ── Files ─────────────────────────────────────────────────────────────────────
 
-bool Client::send_message(const std::string& recipient_username,
-                           const std::string& ciphertext_b64,
-                           const std::string& nonce_b64,
-                           const std::optional<std::string>& subject,
-                           const std::optional<std::string>& encrypted_key_b64) {
+std::optional<int> Client::upload_file(const std::string& recipient_username,
+                                       const UploadPayload& payload) {
     json body;
     body["recipient_username"] = recipient_username;
-    body["ciphertext"]         = ciphertext_b64;
-    body["nonce"]              = nonce_b64;
-    if (subject)           body["subject"]       = *subject;
-    if (encrypted_key_b64) body["encrypted_key"] = *encrypted_key_b64;
+    body["ciphertext"]         = payload.ciphertext_b64;
+    body["nonce"]              = payload.nonce_b64;
+    body["encrypted_key"]      = payload.encrypted_key_b64;
+    body["associated_data"]    = payload.associated_data;
+    if (payload.filename)     body["filename"]     = *payload.filename;
+    if (payload.content_type) body["content_type"] = *payload.content_type;
+    if (payload.size_bytes)   body["size_bytes"]   = *payload.size_bytes;
+    if (payload.subject)      body["subject"]      = *payload.subject;
 
-    auto resp = request("POST", "/messages/send", body.dump());
+    auto resp = request("POST", "/files/upload", body.dump());
     if (resp.status_code != 201) {
         print_error(resp.status_code, resp.body);
-        return false;
+        return std::nullopt;
     }
-    return true;
+    try {
+        return json::parse(resp.body).at("id").get<int>();
+    } catch (const std::exception& e) {
+        std::cerr << "Failed to parse upload response: " << e.what() << "\n";
+        return std::nullopt;
+    }
 }
 
-std::vector<Message> Client::get_inbox(int skip, int limit) {
+std::vector<File> Client::get_file_listing(const std::string& endpoint,
+                                           int skip, int limit) {
     const std::string path =
-        "/messages/inbox?skip=" + std::to_string(skip) +
-        "&limit=" + std::to_string(limit);
+        endpoint + "?skip=" + std::to_string(skip) + "&limit=" + std::to_string(limit);
     auto resp = request("GET", path);
     if (resp.status_code != 200) {
         print_error(resp.status_code, resp.body);
         return {};
     }
-    std::vector<Message> messages;
+    std::vector<File> files;
     try {
         auto arr = json::parse(resp.body);
-        messages.reserve(arr.size());
+        files.reserve(arr.size());
         for (const auto& j : arr) {
-            messages.push_back(parse_message_item(j));
+            files.push_back(parse_file_item(j));
         }
     } catch (const std::exception& e) {
-        std::cerr << "Failed to parse inbox: " << e.what() << "\n";
+        std::cerr << "Failed to parse file listing: " << e.what() << "\n";
     }
-    return messages;
+    return files;
 }
 
-std::vector<Message> Client::get_sent(int skip, int limit) {
-    const std::string path =
-        "/messages/sent?skip=" + std::to_string(skip) +
-        "&limit=" + std::to_string(limit);
-    auto resp = request("GET", path);
-    if (resp.status_code != 200) {
-        print_error(resp.status_code, resp.body);
-        return {};
-    }
-    std::vector<Message> messages;
-    try {
-        auto arr = json::parse(resp.body);
-        messages.reserve(arr.size());
-        for (const auto& j : arr) {
-            messages.push_back(parse_message_item(j));
-        }
-    } catch (const std::exception& e) {
-        std::cerr << "Failed to parse sent messages: " << e.what() << "\n";
-    }
-    return messages;
+std::vector<File> Client::get_shared(int skip, int limit) {
+    return get_file_listing("/files/shared", skip, limit);
 }
 
-std::optional<Message> Client::download_message(int message_id) {
-    const std::string path = "/messages/" + std::to_string(message_id) + "/download";
+std::vector<File> Client::get_owned(int skip, int limit) {
+    return get_file_listing("/files/owned", skip, limit);
+}
+
+std::optional<File> Client::download_file(int file_id) {
+    const std::string path = "/files/" + std::to_string(file_id) + "/download";
     auto resp = request("GET", path);
     if (resp.status_code == 404) return std::nullopt;
     if (resp.status_code != 200) {
@@ -320,28 +317,62 @@ std::optional<Message> Client::download_message(int message_id) {
     }
     try {
         auto j = json::parse(resp.body);
-        Message msg = parse_message_item(j);
+        File file = parse_file_item(j);
         if (j.contains("ciphertext") && !j["ciphertext"].is_null())
-            msg.set_ciphertext(j["ciphertext"].get<std::string>());
+            file.set_ciphertext(j["ciphertext"].get<std::string>());
         if (j.contains("nonce") && !j["nonce"].is_null())
-            msg.set_nonce(j["nonce"].get<std::string>());
+            file.set_nonce(j["nonce"].get<std::string>());
         if (j.contains("associated_data") && !j["associated_data"].is_null())
-            msg.set_associated_data(j["associated_data"].get<std::string>());
+            file.set_associated_data(j["associated_data"].get<std::string>());
         if (j.contains("encrypted_key") && !j["encrypted_key"].is_null())
-            msg.set_encrypted_key(j["encrypted_key"].get<std::string>());
+            file.set_encrypted_key(j["encrypted_key"].get<std::string>());
         if (j.contains("integrity_hash") && !j["integrity_hash"].is_null())
-            msg.set_integrity_hash(j["integrity_hash"].get<std::string>());
-        msg.mark_read();
-        return msg;
+            file.set_integrity_hash(j["integrity_hash"].get<std::string>());
+        file.mark_read();
+        return file;
     } catch (const std::exception& e) {
-        std::cerr << "Failed to parse downloaded message: " << e.what() << "\n";
+        std::cerr << "Failed to parse downloaded file: " << e.what() << "\n";
         return std::nullopt;
     }
 }
 
-bool Client::delete_message(int message_id) {
-    const std::string path = "/messages/" + std::to_string(message_id);
+bool Client::delete_file(int file_id) {
+    const std::string path = "/files/" + std::to_string(file_id);
     auto resp = request("DELETE", path);
+    if (resp.status_code != 200) {
+        print_error(resp.status_code, resp.body);
+        return false;
+    }
+    return true;
+}
+
+bool Client::share_file(int file_id,
+                        const std::string& recipient_username,
+                        const std::string& new_ciphertext_b64,
+                        const std::string& new_nonce_b64,
+                        const std::string& new_encrypted_key_b64) {
+    json body;
+    body["recipient_username"] = recipient_username;
+    body["new_ciphertext"]     = new_ciphertext_b64;
+    body["new_nonce"]          = new_nonce_b64;
+    body["new_encrypted_key"]  = new_encrypted_key_b64;
+
+    const std::string path = "/files/" + std::to_string(file_id) + "/share";
+    auto resp = request("POST", path, body.dump());
+    if (resp.status_code != 200 && resp.status_code != 201) {
+        print_error(resp.status_code, resp.body);
+        return false;
+    }
+    return true;
+}
+
+bool Client::revoke_access(int file_id,
+                           const std::optional<std::string>& recipient_username) {
+    json body = json::object();
+    if (recipient_username) body["recipient_username"] = *recipient_username;
+
+    const std::string path = "/files/" + std::to_string(file_id) + "/revoke";
+    auto resp = request("POST", path, body.dump());
     if (resp.status_code != 200) {
         print_error(resp.status_code, resp.body);
         return false;

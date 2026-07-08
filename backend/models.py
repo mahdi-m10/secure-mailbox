@@ -5,9 +5,25 @@ Tables
 ------
   users             — registered accounts
   sessions          — active auth sessions / refresh tokens
-  messages          — encrypted message payloads
-  message_access    — per-recipient access-control records
+  files             — encrypted file payloads (the mailbox contents)
+  file_access       — per-recipient access-control records
   blockchain_records — append-only audit log (simulated chain)
+
+Migration note (mailbox pivot)
+------------------------------
+The former ``messages`` / ``message_access`` tables are renamed to ``files`` /
+``file_access`` and gain optional file-metadata columns.  Development databases
+are created via ``create_all`` — delete the .db file and restart to pick up the
+new schema.  For an existing database that must be preserved:
+
+    ALTER TABLE messages RENAME TO files;
+    ALTER TABLE message_access RENAME TO file_access;
+    ALTER TABLE file_access RENAME COLUMN message_id TO file_id;
+    ALTER TABLE blockchain_records RENAME COLUMN message_id TO file_id;
+    ALTER TABLE files RENAME COLUMN sender_id TO owner_id;
+    ALTER TABLE files ADD COLUMN filename VARCHAR(255);
+    ALTER TABLE files ADD COLUMN content_type VARCHAR(127);
+    ALTER TABLE files ADD COLUMN size_bytes INTEGER;
 """
 
 from datetime import datetime, timezone
@@ -57,12 +73,12 @@ class User(Base):
     )
 
     # Relationships
-    sent_messages: Mapped[list["Message"]] = relationship(
-        "Message", back_populates="sender", foreign_keys="Message.sender_id"
+    owned_files: Mapped[list["FileObject"]] = relationship(
+        "FileObject", back_populates="owner", foreign_keys="FileObject.owner_id"
     )
     sessions: Mapped[list["Session"]] = relationship("Session", back_populates="user")
-    access_records: Mapped[list["MessageAccess"]] = relationship(
-        "MessageAccess", back_populates="recipient"
+    access_records: Mapped[list["FileAccess"]] = relationship(
+        "FileAccess", back_populates="recipient"
     )
 
 
@@ -96,18 +112,22 @@ class Session(Base):
 
 
 # ---------------------------------------------------------------------------
-# messages
+# files
 # ---------------------------------------------------------------------------
-class Message(Base):
+class FileObject(Base):
     """
-    An encrypted message.  The ciphertext is stored opaquely; only the
-    intended recipient can decrypt it using their private key.
+    An encrypted file in the mailbox.  The ciphertext is stored opaquely; only
+    an authorised recipient can decrypt it using their private key.
+
+    ``owner_id`` is the uploading user.  In HPKE terms the owner is the
+    *sender* (their static key authenticates the ciphertext); recipients are
+    the users holding FileAccess rows.
     """
 
-    __tablename__ = "messages"
+    __tablename__ = "files"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
-    sender_id: Mapped[int] = mapped_column(
+    owner_id: Mapped[int] = mapped_column(
         Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True
     )
 
@@ -117,13 +137,25 @@ class Message(Base):
     # Optional subject line (may itself be encrypted)
     subject: Mapped[str | None] = mapped_column(String(512), nullable=True)
 
+    # ── File metadata (client-supplied, optional) ────────────────────────
+    # Original filename for display and download naming.  Stored as given by
+    # the client; may itself be client-side encrypted in a future revision
+    # (it is visible to the server — see docs/crypto-design.md §8.5).
+    filename: Mapped[str | None] = mapped_column(String(255), nullable=True)
+
+    # MIME type of the *plaintext* (e.g. "application/pdf").  Advisory only —
+    # the server never inspects the ciphertext to verify it.
+    content_type: Mapped[str | None] = mapped_column(String(127), nullable=True)
+
+    # Size of the plaintext in bytes, as reported by the uploading client.
+    size_bytes: Mapped[int | None] = mapped_column(Integer, nullable=True)
+
     # SHA-256 / HMAC integrity tag for tamper detection
     integrity_hash: Mapped[str | None] = mapped_column(String(256), nullable=True)
 
     is_deleted: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
-    # Marks messages created by the forward endpoint (re-encrypted for a new recipient).
-    # Existing rows will be NULL (treated as False); new DB gets the column via create_all.
-    # Migration for existing DB: ALTER TABLE messages ADD COLUMN is_forwarded BOOLEAN DEFAULT 0;
+    # Marks files created by the share/forward endpoint (re-encrypted for a
+    # new recipient).  Existing rows will be NULL (treated as False).
     is_forwarded: Mapped[bool | None] = mapped_column(
         Boolean, default=False, nullable=True, server_default="0"
     )
@@ -132,40 +164,40 @@ class Message(Base):
     )
 
     # Relationships
-    sender: Mapped["User"] = relationship(
-        "User", back_populates="sent_messages", foreign_keys=[sender_id]
+    owner: Mapped["User"] = relationship(
+        "User", back_populates="owned_files", foreign_keys=[owner_id]
     )
-    access_records: Mapped[list["MessageAccess"]] = relationship(
-        "MessageAccess", back_populates="message"
+    access_records: Mapped[list["FileAccess"]] = relationship(
+        "FileAccess", back_populates="file"
     )
     blockchain_record: Mapped["BlockchainRecord | None"] = relationship(
-        "BlockchainRecord", back_populates="message", uselist=False
+        "BlockchainRecord", back_populates="file", uselist=False
     )
 
 
 # ---------------------------------------------------------------------------
-# message_access  (per-recipient ACL)
+# file_access  (per-recipient ACL)
 # ---------------------------------------------------------------------------
-class MessageAccess(Base):
+class FileAccess(Base):
     """
-    Links a message to each authorised recipient.
+    Links a file to each authorised recipient.
 
-    The encrypted_key field stores the message symmetric key wrapped
-    (encrypted) with the recipient's public key, so only that recipient
-    can unwrap it.
+    The encrypted_key field stores the HPKE encapsulated key (the ephemeral
+    X25519 public key) for this recipient, so only that recipient can derive
+    the content key and decrypt.
     """
 
-    __tablename__ = "message_access"
+    __tablename__ = "file_access"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
-    message_id: Mapped[int] = mapped_column(
-        Integer, ForeignKey("messages.id", ondelete="CASCADE"), nullable=False, index=True
+    file_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("files.id", ondelete="CASCADE"), nullable=False, index=True
     )
     recipient_id: Mapped[int] = mapped_column(
         Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True
     )
 
-    # Symmetric key encrypted with recipient's public key (base64)
+    # HPKE encapsulated key for this recipient (base64)
     encrypted_key: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     is_read: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
@@ -175,7 +207,7 @@ class MessageAccess(Base):
     )
 
     # Relationships
-    message: Mapped["Message"] = relationship("Message", back_populates="access_records")
+    file: Mapped["FileObject"] = relationship("FileObject", back_populates="access_records")
     recipient: Mapped["User"] = relationship("User", back_populates="access_records")
 
 
@@ -184,11 +216,11 @@ class MessageAccess(Base):
 # ---------------------------------------------------------------------------
 class BlockchainRecord(Base):
     """
-    Append-only audit log that links each message to a chain of hashes,
+    Append-only audit log that links each file to a chain of hashes,
     providing tamper-evidence similar to a blockchain structure.
 
     Each record stores:
-      - A hash of the current message
+      - A hash of the current file's ciphertext
       - The hash of the *previous* record (chain link)
       - A combined block hash (prev_hash + message_hash)
     """
@@ -196,15 +228,15 @@ class BlockchainRecord(Base):
     __tablename__ = "blockchain_records"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
-    message_id: Mapped[int] = mapped_column(
+    file_id: Mapped[int] = mapped_column(
         Integer,
-        ForeignKey("messages.id", ondelete="RESTRICT"),   # never delete a chained record
+        ForeignKey("files.id", ondelete="RESTRICT"),   # never delete a chained record
         unique=True,
         nullable=False,
         index=True,
     )
 
-    # SHA-256 of the message ciphertext + metadata
+    # SHA-256 of the file ciphertext + metadata
     message_hash: Mapped[str] = mapped_column(String(256), nullable=False)
 
     # Hash of the immediately preceding BlockchainRecord (genesis block = "0" * 64)
@@ -224,4 +256,4 @@ class BlockchainRecord(Base):
     )
 
     # Relationships
-    message: Mapped["Message"] = relationship("Message", back_populates="blockchain_record")
+    file: Mapped["FileObject"] = relationship("FileObject", back_populates="blockchain_record")

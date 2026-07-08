@@ -3,21 +3,21 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>SecureMsg — Verify Integrity</title>
+  <title>SecureMailbox — Verify Integrity</title>
   <link rel="stylesheet" href="css/style.css">
 </head>
 <body class="verify-page">
 
   <!-- ── Navbar ── -->
   <nav class="verify-navbar">
-    <a href="chat.html" class="nav-logo">
+    <a href="files.html" class="nav-logo">
       <div class="logo-icon">
         <i data-lucide="lock-keyhole"></i>
       </div>
-      SecureMsg
+      SecureMailbox
     </a>
     <div class="nav-links">
-      <a href="chat.html">Messages</a>
+      <a href="files.html">Files</a>
       <a href="index.html">Sign out</a>
     </div>
   </nav>
@@ -28,24 +28,24 @@
 
       <h1>Blockchain Verification</h1>
       <p>
-        Verify that a message's encrypted payload has not been altered since it was
-        recorded. The server stores a keccak256 hash of each message's ciphertext blob
-        at send time. This tool recomputes that hash and compares it to the stored record.
+        Verify that a file's encrypted payload has not been altered since it was
+        recorded. The server stores a keccak256 hash of each file's ciphertext blob
+        at upload time. This tool recomputes that hash and compares it to the stored record.
       </p>
 
       <!-- Auth warning (shown when not logged in) -->
       <div id="auth-warning" class="auth-warning" style="display:none">
         <i data-lucide="triangle-alert" style="width:16px;height:16px;flex-shrink:0"></i>
-        You are not signed in. You can only verify messages you have access to.
+        You are not signed in. You can only verify files you have access to.
         <a href="index.html" class="btn btn-primary btn-sm" style="margin-left:auto">Sign In</a>
       </div>
 
       <!-- Lookup form -->
       <div class="verify-card">
-        <h2>Enter Message Details</h2>
+        <h2>Enter File Details</h2>
         <form id="verify-form" novalidate>
           <div class="form-group">
-            <label for="verify-msg-id">Message ID</label>
+            <label for="verify-msg-id">File ID</label>
             <input id="verify-msg-id" type="number" min="1" step="1"
                    placeholder="e.g. 42"
                    required>
@@ -59,7 +59,7 @@
               Verify Integrity
             </button>
             <span style="font-size:12px;color:var(--slate-400)">
-              Requires access to the message
+              Requires access to the file
             </span>
           </div>
         </form>
@@ -119,14 +119,14 @@
             </div>
 
             <!-- Message metadata -->
-            <div class="result-section-label" style="margin-top:20px">Message Metadata</div>
+            <div class="result-section-label" style="margin-top:20px">File Metadata</div>
             <div class="meta-grid">
               <div class="meta-item">
-                <label>Message ID</label>
+                <label>File ID</label>
                 <span id="meta-msg-id">—</span>
               </div>
               <div class="meta-item">
-                <label>Sender</label>
+                <label>Uploader</label>
                 <span id="meta-sender">—</span>
               </div>
               <div class="meta-item">
@@ -138,7 +138,7 @@
                 <span id="meta-read">—</span>
               </div>
               <div class="meta-item wide">
-                <label>Subject</label>
+                <label>Filename / note</label>
                 <span id="meta-subject">—</span>
               </div>
               <div class="meta-item wide">

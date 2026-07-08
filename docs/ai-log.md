@@ -472,4 +472,57 @@ Design choices not explicitly specified in my direction:
 
 ---
 
+## Entry 8 — Test-suite extension (/files endpoint behaviour + crypto E2E)
+
+**What I asked for:**
+- Extend the backend suite to cover the /files surface built in the pivot:
+  upload/listing/delete/share/revoke semantics and error codes, plus
+  end-to-end crypto through the real API — including AAD-replay behaviour
+  across file IDs.
+
+**What was produced:**
+- `tests/test_files_api.py` (21 tests): upload error codes (401/400
+  self-upload/404 unknown recipient/422 bad nonce/422 oversize ciphertext,
+  asserted against the schema cap constant so the test tracks the limit),
+  metadata persistence, both listings' shapes, read-marking on download,
+  owner-only delete (403/404/double-delete), both share paths (re-encrypt
+  creates a new is_forwarded row owned by the sharer carrying the new
+  encrypted_key; legacy adds access to the original), share guards
+  (409 duplicate / 400 self / 404 stranger — IDOR posture), and revocation
+  (targeted, full, owner-only, 404 for a non-recipient).
+- `tests/test_crypto_e2e.py` (7 tests) — real X25519 keys through the real
+  app, plus a `db_session` fixture that edits rows out-of-band to simulate
+  a compromised server:
+  - full upload→download→rebuild-AAD-locally→decapsulate round-trip;
+  - server-side filename relabel in SQLite → decryption fails (the §7
+    binding, now proven at the API level, not just the crypto layer);
+  - **duplication boundary pinned as a test**: a replayed identical record
+    under a NEW file ID still decrypts — asserted deliberately, because it
+    is the documented §7 limitation (file ID unbindable at encrypt time);
+    the test exists so a future fix or an accidental regression is noticed;
+  - cross-recipient replay fails (content key bound to the recipient's key
+    pair); re-attribution fails (dh2 binds the sender's static key);
+  - re-encrypt share end-to-end (bob→carol) byte-exact;
+  - blockchain-proof endpoint verifies keccak256 locally and detects
+    ciphertext tampering, without Sepolia configured.
+- **Bug found and fixed by the new tests**: `/files/owned` reached the
+  recipient username via INNER joins on `file_access`, so a file whose
+  every access row had been revoked disappeared from its owner's own
+  listing — contradicting the revoke endpoint's documented contract
+  ("the owner can still see the file"). Changed to OUTER joins with a
+  null-safe recipient field.
+- Suite: 21 → 51 tests, all passing.
+
+Design choices not explicitly specified in my direction:
+- **DECISION — the duplication limitation is asserted, not skipped:** a
+  test that *expects* the replay to decrypt turns the documented residual
+  into an executable specification of the boundary.
+- **DECISION — compromised-server simulation via direct DB edits**
+  (`db_session` fixture) rather than mocking: the tests tamper exactly
+  where a real attacker with database control would.
+
+**Corrections / rejections:** none yet (pending review of this chunk).
+
+---
+
 ---

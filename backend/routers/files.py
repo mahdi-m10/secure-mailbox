@@ -594,14 +594,18 @@ def list_owned_files(
         .subquery()
     )
 
+    # OUTER joins throughout: a file whose every access row was revoked has
+    # no recipient — it must still appear in the owner's list (revocation is
+    # access control, not deletion; an inner join here silently hid fully
+    # revoked files from their owner).
     stmt = (
         select(models.FileObject, RecipientUser)
-        .join(first_access_sq, first_access_sq.c.file_id == models.FileObject.id)
-        .join(
+        .outerjoin(first_access_sq, first_access_sq.c.file_id == models.FileObject.id)
+        .outerjoin(
             models.FileAccess,
             models.FileAccess.id == first_access_sq.c.id,
         )
-        .join(
+        .outerjoin(
             RecipientUser,
             RecipientUser.id == models.FileAccess.recipient_id,
         )
@@ -620,7 +624,7 @@ def list_owned_files(
             "id":                 file_obj.id,
             "owner_id":           file_obj.owner_id,
             "owner_username":     current_user.username,
-            "recipient_username": recipient.username,
+            "recipient_username": recipient.username if recipient else None,
             "subject":            file_obj.subject,
             "filename":           file_obj.filename,
             "content_type":       file_obj.content_type,

@@ -67,6 +67,18 @@ def _reset_rate_limiter():
 
 
 @pytest.fixture
+def db_session():
+    """Direct session on the test DB — for tests that simulate a malicious /
+    compromised server by editing rows out-of-band (e.g. relabelling a
+    filename to prove the AAD binding catches it)."""
+    db = _TestingSession()
+    try:
+        yield db
+    finally:
+        db.close()
+
+
+@pytest.fixture
 def client():
     """TestClient wired to the test database (production DB is never touched)."""
 

@@ -525,4 +525,39 @@ Design choices not explicitly specified in my direction:
 
 ---
 
+## Entry 9 — Docs cleanup: main README rewrite, dead crypto modules removed
+
+**What I asked for:**
+- Rewrite the root README for the completed mailbox pivot, and resolve the
+  §8.9 dead-code item (`backend/crypto/kdf.py` / `aead.py`) by marking or
+  removing — completing the pivot as a unit before the blockchain work.
+
+**What was produced:**
+- `README.md` rewritten: file-mailbox description and feature list (upload /
+  listings / re-encrypt share / revoke / soft-delete, IDOR posture, size
+  caps), the AAD binding, TOFU pinning and both key vaults described
+  accurately, repository tree updated (files.py, files.html, docs/, current
+  crypto/ contents), C++ binary name corrected, test count updated to 51,
+  design-decisions section extended (AAD no-fallback rationale, TOFU,
+  key-at-rest KDF distinctness, share-as-re-encryption).
+- **DECISION — dead modules removed rather than marked:** `kdf.py` and
+  `aead.py` were reference modules no production path ever called; the
+  key-wrap work that might have consumed them landed client-side. Removal
+  keeps the reviewable crypto surface equal to the running crypto surface
+  (a security review should not audit code that cannot run); git history
+  retains them. `backend/crypto/__init__.py` re-exports trimmed
+  accordingly and its docstring records the removal; design doc §8.9
+  updated to "resolved by removal".
+- **DECISION — the HKDF `info` string stays `b"secure-messenger"`:** it is
+  a wire-format constant baked into every existing ciphertext and all three
+  implementations; renaming it to match the product name would break
+  decryption of everything already stored for zero security gain. Noted
+  here so the mismatch with the "Secure Mailbox" name is visibly deliberate.
+- Stale `chat.html` reference in a `main.py` comment fixed. Full suite
+  still 51/51 after the module removal.
+
+**Corrections / rejections:** none yet (pending review of this chunk).
+
+---
+
 ---

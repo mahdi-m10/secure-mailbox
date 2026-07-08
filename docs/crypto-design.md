@@ -555,14 +555,16 @@ legacy data in tests — but no shipped call site passes empty AAD.
 8. **Residual JWT validity** after logout/password change: stateless access
    tokens stay cryptographically valid up to 30 min. Standard trade; refresh
    tokens *are* revoked server-side immediately.
-9. **Dead code honesty:** `backend/crypto/kdf.py` (generic `derive_key` +
-   `INFO_*` domain-separation constants) and `backend/crypto/aead.py`
-   (standalone AES-GCM helpers with random nonces) are reference modules —
-   **no production path calls them**. The live paths are `hpke.py`,
-   `crypto.js`, and the C++ `Crypto.cpp` only. The key-wrap work (limitation
-   3) once looked like their natural consumer but landed entirely
-   client-side (Web Crypto / libsodium), so they remain dead; they will be
-   clearly marked as illustrative or removed in the docs cleanup.
+9. **Dead code honesty — resolved by removal:** `backend/crypto/kdf.py`
+   (generic `derive_key` + `INFO_*` domain-separation constants) and
+   `backend/crypto/aead.py` (standalone AES-GCM helpers with random nonces)
+   were reference modules **no production path ever called**. The key-wrap
+   work (limitation 3) once looked like their natural consumer but landed
+   entirely client-side (Web Crypto / libsodium), so they were removed in
+   the docs-cleanup chunk — a security review should not have to audit code
+   that cannot run. They remain in git history. The live crypto surfaces
+   are `hpke.py` + `password.py` (server), `crypto.js` (web), and
+   `Crypto.cpp` (C++).
 10. **Denial of service:** rate limiting exists on login only; upload
     endpoints need size caps + rate limits (networks/pentest work item, noted
     here for completeness).

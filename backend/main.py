@@ -110,7 +110,7 @@ def health_check():
 # ---------------------------------------------------------------------------
 # Static files — web client
 # Must be mounted AFTER all API routes so the API routes take precedence.
-# Accessible at /app/index.html, /app/chat.html, etc.
+# Accessible at /app/index.html, /app/files.html, etc.
 # ---------------------------------------------------------------------------
 _web_client = Path(__file__).parent.parent / "web-client"
 app.mount("/app", StaticFiles(directory=_web_client, html=True), name="web-client")

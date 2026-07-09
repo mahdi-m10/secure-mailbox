@@ -560,4 +560,96 @@ Design choices not explicitly specified in my direction:
 
 ---
 
+## Entry 10 — Blockchain scope B1: KeyRegistry + MessageReceipt contracts
+
+**What I asked for:**
+- Blockchain scope conflict resolved by the module leader: the separate
+  blockchain brief takes precedence over the main epic spec, since it is
+  assessed directly. Full brief scope on a new branch off main, broken into
+  reviewable sub-chunks: contracts first (B1), then backend integration
+  (B2), then client integration (B3), then UI (B4), then deployment
+  evidence + docs (B5).
+- B1 specifically: `KeyRegistry.sol` (register/revoke/rotate/getKey,
+  `KeyRegistered`/`KeyRevoked` events) and `MessageReceipt.sol`
+  (`postReceipt`/`getReceipt`), plus Hardhat unit tests covering
+  registration, double-registration revert, revocation, rotation, lookup,
+  receipt posting, and replay.
+- I approved the server-custodial registrar model (proposed because
+  application users hold no Ethereum wallets) and directed the RPC-failure
+  posture before any B3 work: the pre-encrypt on-chain key lookup is a
+  security gate and must fail closed (or require an explicit typed
+  override, matching the TOFU pattern) if the RPC can't be reached — an
+  active network attacker could otherwise silently defeat it by blocking
+  the RPC. Receipt polling after upload is informational, so fail-open
+  with a "pending" status there is fine.
+
+**What was produced:**
+- `KeyRegistry.sol`: identities are `keccak256(username)`; keys are raw
+  32-byte X25519 public keys (fit exactly in `bytes32`). `registerKey`
+  reverts on re-registration of an existing identity (rotation must be
+  explicit); `rotateKey` requires an existing record, bumps `version`,
+  clears any revocation, re-emits `KeyRegistered`; `revokeKey` flags
+  `revoked` without deleting the record (clients must distinguish "revoked"
+  from "never registered"); `getKey` returns `version == 0` for unknown
+  identities. Registrar-only via a `transferRegistrar` pattern mirroring
+  `MessageDigest`'s existing `onlyOwner`/`transferOwnership`.
+- `MessageReceipt.sol`: `postReceipt(ciphertextHash, senderHash,
+  recipientHash)` keyed by the same keccak256 `integrity_hash` the app
+  already computes; reverts on replay (one ciphertext hash → one immutable
+  receipt, forever); `getReceipt` returns `exists=false` with zeroed fields
+  for an unposted hash. Server-only via the same transfer pattern.
+- 26 new Hardhat tests (17 KeyRegistry + 9 MessageReceipt) covering exactly
+  the brief's list plus the access-control and identity-independence edges;
+  full suite (including the pre-existing 5 MessageDigest tests) is 31/31,
+  all passing on the local Hardhat network.
+- `scripts/deploy-registry.js`: deploys both new contracts and prints the
+  `.env` block; kept separate from the existing `deploy.js` so running it
+  never touches or re-deploys the already-live Sepolia `MessageDigest`
+  contract. Dry-run verified on the local network.
+- `docs/crypto-design.md`: §3(d)1 and §8.1 updated to name `KeyRegistry` as
+  the mitigation that section anticipated, precisely scoped (public
+  transparency log, not a trustless PKI; registrar-compromise-from-day-one
+  is still undetectable; no client performs the check yet — TOFU remains
+  the only live mitigation until B3). New §8.11 states the two contracts'
+  own trust boundaries (registrar-custodial integrity; a receipt proves
+  acceptance, not continued availability). §9 rows added for both gaps.
+
+Design choices not explicitly specified in my direction:
+- **DECISION — solc-js instead of the native compiler binary:** Hardhat's
+  default compile step downloads a native solc binary from
+  binaries.soliditylang.org, which this session's network policy blocks
+  (403). Rather than asking for that host to be allowlisted (a fix scoped
+  to this one environment), I installed the `solc` npm package (fetched
+  from the already-allowed npm registry) and added a Hardhat compiler-
+  resolution override in `hardhat.config.js` that uses its bundled WASM
+  build for solc 0.8.20 instead of downloading. This makes `npm install &&
+  npx hardhat compile/test` reproducible on any machine with npm access,
+  including a marker's or CI's, regardless of that machine's own network
+  policy — a stronger property than fixing this session alone.
+- **DECISION — identities as `keccak256(username)`, keys as raw
+  `bytes32`:** avoids putting plaintext usernames on a public chain while
+  keeping both contracts free of string handling and dynamic-length
+  storage (cheaper gas, simpler audit surface); X25519 public keys are
+  exactly 32 bytes so no encoding scheme is needed.
+- **DECISION — revoked records stay readable, not deleted:** deleting a
+  revoked entry would make it indistinguishable from an identity that was
+  never registered, which is exactly the ambiguity a revocation check must
+  resolve.
+- **DECISION — registerKey refuses to double-register; rotateKey requires
+  a prior record:** keeps the two operations' preconditions symmetric and
+  explicit, so "was this identity ever seen before" is never ambiguous at
+  the call site.
+- **DECISION — `MessageReceipt` keyed by ciphertext hash, not a
+  server-assigned file ID:** the file ID is a SQLite auto-increment value
+  with no meaning on-chain and no stability guarantee across databases;
+  the ciphertext hash is already computed for `MessageDigest` and is the
+  one value both the server and a verifying client can derive
+  independently from the same bytes.
+- **DECISION — separate deploy script rather than extending deploy.js:**
+  isolates the new contracts' one-time deployment from the existing live
+  Sepolia contract's deploy path, so there is no script that could
+  accidentally redeploy or orphan the contract already in production use.
+
+**Corrections / rejections:** none yet (pending review of this chunk).
+
 ---

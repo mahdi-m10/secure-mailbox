@@ -131,6 +131,11 @@ arbitrary responses.
    who blindly clicks through the override warning re-opens the hole.
    Out-of-band fingerprint comparison (both clients display fingerprints) or
    the proposed blockchain key registry would close first-contact trust.
+   **Status: the on-chain `KeyRegistry` contract now exists** (registration,
+   rotation, revocation, public `getKey` lookup — §9), but as of this chunk
+   no client consults it before encrypting; TOFU pinning remains the only
+   live mitigation until the client-integration sub-chunk lands. See §8.1
+   for the registry's own trust-model residual once it is wired in.
 2. **Availability & completeness.** The server can drop, withhold, reorder, or
    duplicate files, or lie in listings. Asynchronous store-and-forward cannot
    prevent this; it can at best be made evident (out of scope here; the
@@ -519,10 +524,19 @@ legacy data in tests — but no shipped call site passes empty AAD.
    explicit override re-pins), so key substitution against established pairs
    is detected. The residual gap is inherent to TOFU: the very first fetch of
    a peer's key is trusted unverified, and a user can click through the
-   mismatch warning. Mitigations: out-of-band fingerprint comparison (both
-   clients display SHA-256 fingerprints); the proposed blockchain
-   key-registry component, if confirmed, would strengthen first-contact
-   trust beyond TOFU.
+   mismatch warning. **The on-chain `KeyRegistry` contract (blockchain
+   scope, contracts + unit tests landed this chunk) is the mitigation this
+   section anticipated**: a server-custodial registrar posts each user's key
+   on Sepolia at registration, so a substitution is either publicly visible
+   as a contradicting on-chain event or requires the server to serve a key
+   that disagrees with the chain — detectable by any client that checks.
+   Precise scope of the claim, stated so it is not overclaimed: this is a
+   **public transparency log**, not a trustless PKI — a registrar that lies
+   from a user's very first registration is still undetectable, and until
+   the client-integration sub-chunk lands, no client actually performs the
+   on-chain check, so TOFU remains the only *live* mitigation today.
+   Out-of-band fingerprint comparison remains a complementary defence
+   either way.
 2. **No forward secrecy / no post-compromise security** (§3(d)5) — accepted
    for scope; would require a ratchet or per-session ephemeral–ephemeral
    exchange, which asynchronous offline delivery complicates.
@@ -568,6 +582,18 @@ legacy data in tests — but no shipped call site passes empty AAD.
 10. **Denial of service:** rate limiting exists on login only; upload
     endpoints need size caps + rate limits (networks/pentest work item, noted
     here for completeness).
+11. **`KeyRegistry`/`MessageReceipt` trust boundaries (new this chunk).**
+    (a) Registrar-custodial model: the registry's integrity depends on the
+    server's registrar wallet key; a compromised server can post arbitrary
+    (mis)registrations as easily as it can lie off-chain — the value is
+    *making a substitution publicly visible and non-repudiable*, not
+    preventing the server from acting maliciously. (b) `MessageReceipt` proves
+    the server accepted a specific ciphertext at a specific time; it does
+    NOT prove the server will keep serving it — a server can still simply
+    withhold a file it never posted a receipt for, which the uploading
+    client detects at upload time by the *absence* of a receipt, not
+    after the fact. (c) Neither contract is wired into any client yet
+    (contracts + unit tests only, this chunk) — see the remediation map.
 
 ---
 
@@ -576,6 +602,8 @@ legacy data in tests — but no shipped call site passes empty AAD.
 | Gap | Fix | When |
 |---|---|---|
 | §8.1 key pinning | **Done — both clients.** TOFU pin store (web: IndexedDB; C++: per-account pin file), hard block + fingerprint display on change, explicit override re-pins. Residual: first-contact trust (inherent to TOFU; blockchain registry would strengthen) | Web + C++ rework chunks (landed) |
+| §8.1 / §8.11 first-contact trust | `KeyRegistry.sol` deployed + unit-tested (register/rotate/revoke/getKey, 17 tests, all passing). Remaining: client integration (lookup + refuse-on-revoked before encrypt, fail-closed on RPC failure — matches the TOFU fail-closed pattern, not fail-open) | Blockchain sub-chunk B1 (landed) → B3 (client integration) |
+| §8.11 receipt evidence | `MessageReceipt.sol` deployed + unit-tested (postReceipt/getReceipt, replay-reverts, 9 tests). Remaining: server posts a receipt after each accepted upload; clients poll and surface confirmation/pending status (informational, fail-open acceptable) | Blockchain sub-chunk B1 (landed) → B2 (backend integration) |
 | §8.4 AAD | **Done — enforcement live at every call site in both clients** (canonical username/filename form; file ID excluded — unbindable pre-upload; no AAD-less fallback). Residual: same-pair duplication | Web + C++ rework chunks (landed) |
 | §8.3 key-at-rest | **Done — both clients.** C++: Argon2id(passphrase, dedicated salt/params) → XSalsa20-Poly1305 key-wrap vault (secretbox chosen over AES-GCM so the vault opens without AES-NI). Web: PBKDF2-HMAC-SHA256 (600k, dedicated salt) → AES-256-GCM via `wrapKey`/`unwrapKey`; session key non-extractable; legacy keys replaced via upgrade flow. Residual: PBKDF2 not memory-hard (§8.3) | C++ + web key-vault chunks (landed) |
 | §8.6 upload cap | Enforced max upload size + documented limit | Files-router chunk |

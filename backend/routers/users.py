@@ -33,6 +33,8 @@ This is the same trust model used by Signal (safety numbers) and WhatsApp.
 See backend/crypto/hpke.py for the full TOFU explanation.
 """
 
+import threading
+
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -40,7 +42,7 @@ from sqlalchemy.orm import Session
 from backend import models
 from backend.database import get_db
 from backend.dependencies import get_current_user
-from backend.schemas import PublicKeyUpload, UserPublicKeyResponse
+from backend.schemas import OnChainKeyInfo, PublicKeyUpload, UserPublicKeyResponse
 
 router = APIRouter(prefix="/users", tags=["users"])
 
@@ -94,7 +96,16 @@ def list_users(
 def get_user(
     username: str,
     db: Session = Depends(get_db),
-) -> models.User:
+    onchain: bool = Query(
+        default=False,
+        description=(
+            "If true, also perform a LIVE KeyRegistry read for this user and "
+            "return it under `onchain`. Adds an RPC round trip — off by "
+            "default. Not offered on the bulk /users listing (would mean "
+            "one RPC call per user returned)."
+        ),
+    ),
+) -> UserPublicKeyResponse:
     """Return a single active user's HPKE public key by username.
 
     No authentication required.
@@ -106,6 +117,12 @@ def get_user(
     Returns 404 for both non-existent and inactive users — distinguishing
     between the two would let an attacker determine which usernames once
     existed (account enumeration).
+
+    ``?onchain=1`` additionally performs a live KeyRegistry.getKey() call
+    and returns it under ``onchain``. This is informational only — it is
+    NOT the security gate (that lives client-side, per
+    docs/crypto-design.md §3(d)1/§8.1) — so an RPC failure here never fails
+    the request; ``onchain`` is null and ``onchain_error`` explains why.
     """
     user = db.scalars(
         select(models.User).where(
@@ -120,7 +137,18 @@ def get_user(
             detail="User not found.",
         )
 
-    return user
+    result = UserPublicKeyResponse.model_validate(user)
+
+    if onchain:
+        try:
+            from backend.blockchain.registry import get_onchain_key
+
+            info = get_onchain_key(username)
+            result.onchain = OnChainKeyInfo(**info, tx_hash=user.eth_key_tx)
+        except Exception as exc:
+            result.onchain_error = str(exc)
+
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -172,5 +200,15 @@ def upload_public_key(
     db.add(current_user)
     db.commit()
     db.refresh(current_user)
+
+    # Register (first time) or rotate (subsequent uploads) the key on-chain
+    # in the background — never delays this response on an RPC round trip.
+    from backend.blockchain.registry import submit_key_registration_background
+
+    threading.Thread(
+        target=submit_key_registration_background,
+        args=(current_user.id, current_user.username, body.public_key),
+        daemon=True,
+    ).start()
 
     return current_user

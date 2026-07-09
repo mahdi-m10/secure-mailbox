@@ -296,6 +296,52 @@ def _submit_to_chain(file_id: int, integrity_hash: str) -> None:
         logger.error("file %d: failed to persist eth_tx_hash=%r: %r", file_id, eth_tx, exc)
 
 
+def _submit_receipt(file_id: int, integrity_hash: str, sender_username: str, recipient_username: str) -> None:
+    """Post a MessageReceipt for an accepted upload/share and persist the tx
+    hash. Runs in a daemon thread, alongside (not instead of) the
+    MessageDigest anchor submitted by _submit_to_chain — the two contracts
+    serve different purposes (integrity chain vs. sender-signed acceptance
+    evidence, see docs/crypto-design.md §8.11) and are posted independently.
+
+    Never raises into the caller.
+    """
+    import logging
+    from backend.database import SessionLocal
+    from backend.blockchain.receipts import post_receipt
+
+    logger = logging.getLogger(__name__)
+
+    if not integrity_hash:
+        logger.warning("file %d: integrity_hash is empty — skipping receipt", file_id)
+        return
+
+    try:
+        tx_hash = post_receipt(f"0x{integrity_hash}", sender_username, recipient_username)
+        logger.info("file %d: receipt posted on-chain: %s", file_id, tx_hash)
+    except EnvironmentError as exc:
+        logger.error("file %d: blockchain env vars not configured for receipts: %r", file_id, exc)
+        return
+    except (ValueError, RuntimeError) as exc:
+        # ValueError here typically means "receipt already exists" — expected
+        # if this file's ciphertext hash was already receipted (e.g. retry).
+        logger.error("file %d: failed to post receipt: %r", file_id, exc)
+        return
+    except Exception as exc:
+        logger.error("file %d: unexpected error posting receipt: %r", file_id, exc)
+        return
+
+    try:
+        with SessionLocal() as db:
+            file_obj = db.get(models.FileObject, file_id)
+            if file_obj:
+                file_obj.receipt_tx_hash = tx_hash
+                db.commit()
+            else:
+                logger.warning("file %d: FileObject not found when persisting receipt", file_id)
+    except Exception as exc:
+        logger.error("file %d: failed to persist receipt_tx_hash=%r: %r", file_id, tx_hash, exc)
+
+
 # ---------------------------------------------------------------------------
 # Access-control helpers
 # ---------------------------------------------------------------------------
@@ -476,6 +522,15 @@ def upload_file(
     threading.Thread(
         target=_submit_to_chain,
         args=(file_obj.id, file_obj.integrity_hash or ""),
+        daemon=True,
+    ).start()
+
+    # Post a MessageReceipt in the background — independent of the digest
+    # anchor above (see _submit_receipt docstring).
+    threading.Thread(
+        target=_submit_receipt,
+        args=(file_obj.id, file_obj.integrity_hash or "",
+              current_user.username, body.recipient_username),
         daemon=True,
     ).start()
 
@@ -783,6 +838,12 @@ def share_file(
             args=(shared_file.id, shared_file.integrity_hash),
             daemon=True,
         ).start()
+        threading.Thread(
+            target=_submit_receipt,
+            args=(shared_file.id, shared_file.integrity_hash,
+                  current_user.username, new_recipient.username),
+            daemon=True,
+        ).start()
     else:
         # ── Legacy path: share existing file_access row ───────────────
         # The new recipient receives the original ciphertext but cannot
@@ -980,6 +1041,12 @@ def download_file(
         "integrity_hash":  file_obj.integrity_hash,
         "is_read":         access.is_read if access else True,
         "created_at":      file_obj.created_at,
+        # Informational — read from the DB column, not a live chain call
+        # (see docs/crypto-design.md §8.11: fail-open is fine here).
+        "receipt": {
+            "posted":  bool(file_obj.receipt_tx_hash),
+            "tx_hash": file_obj.receipt_tx_hash,
+        },
     }
 
 
@@ -1012,6 +1079,9 @@ def get_blockchain_proof(
       eth_tx_hash   — Sepolia tx hash, or null if not yet anchored
       on_chain      — contract record {exists, hash, timestamp, recorder} or null
       on_chain_match— True when on-chain hash == computed hash, or null
+      receipt_tx_hash — MessageReceipt posting tx hash, or null if not yet posted
+      receipt         — live MessageReceipt.getReceipt() result, or null if
+                        unreachable (best-effort, same as `on_chain` above)
     """
     file_obj = db.get(models.FileObject, file_id)
     if file_obj is None:
@@ -1044,6 +1114,8 @@ def get_blockchain_proof(
         "chain_recorded_at": rec.created_at.isoformat() if rec else None,
         "on_chain":       None,
         "on_chain_match": None,
+        "receipt_tx_hash": file_obj.receipt_tx_hash,
+        "receipt":         None,
     }
 
     if rec and rec.eth_tx_hash and stored_hash:
@@ -1056,5 +1128,12 @@ def get_blockchain_proof(
                 result["on_chain_match"] = (on_chain_hex == computed_hash)
         except Exception:
             pass  # node unreachable — surface what we have from SQLite
+
+    if stored_hash:
+        try:
+            from backend.blockchain.receipts import get_receipt
+            result["receipt"] = get_receipt(f"0x{stored_hash}")
+        except Exception:
+            pass  # node unreachable / not configured — best-effort, same as on_chain
 
     return result

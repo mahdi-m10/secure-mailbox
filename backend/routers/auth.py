@@ -183,6 +183,20 @@ def register(
     db.commit()
     db.refresh(user)   # populate server-generated fields (id, created_at, …)
 
+    # If a public key was supplied at registration (the web client's current
+    # flow), register it on-chain in the background — same helper used by
+    # POST /users/keys, so a key uploaded either way ends up in KeyRegistry.
+    if user.public_key:
+        import threading
+
+        from backend.blockchain.registry import submit_key_registration_background
+
+        threading.Thread(
+            target=submit_key_registration_background,
+            args=(user.id, user.username, user.public_key),
+            daemon=True,
+        ).start()
+
     return user
 
 

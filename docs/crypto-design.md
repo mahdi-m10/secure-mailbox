@@ -198,8 +198,10 @@ Sender (before upload)                    │
   │       lookup — trust model in §3(d)1) │
 ```
 
-The key directory is the server. **Trust model: TOFU-with-pinning is the
-design; the pin is not yet implemented** (§3(d)1, §9).
+The key directory is the server. **Trust model: TOFU-with-pinning**, pin
+implemented and enforced in both clients (§3(d)1, §8.1). The on-chain
+KeyRegistry (§8.11) is an additional, complementary check on this same
+lookup — not yet consulted by any client as of this chunk (§9).
 
 ### 4.3 Upload (encrypt) — HPKE Mode_Auth encapsulation
 
@@ -582,7 +584,7 @@ legacy data in tests — but no shipped call site passes empty AAD.
 10. **Denial of service:** rate limiting exists on login only; upload
     endpoints need size caps + rate limits (networks/pentest work item, noted
     here for completeness).
-11. **`KeyRegistry`/`MessageReceipt` trust boundaries (new this chunk).**
+11. **`KeyRegistry`/`MessageReceipt` trust boundaries.**
     (a) Registrar-custodial model: the registry's integrity depends on the
     server's registrar wallet key; a compromised server can post arbitrary
     (mis)registrations as easily as it can lie off-chain — the value is
@@ -592,8 +594,30 @@ legacy data in tests — but no shipped call site passes empty AAD.
     NOT prove the server will keep serving it — a server can still simply
     withhold a file it never posted a receipt for, which the uploading
     client detects at upload time by the *absence* of a receipt, not
-    after the fact. (c) Neither contract is wired into any client yet
-    (contracts + unit tests only, this chunk) — see the remediation map.
+    after the fact. (c) **Backend integration landed** (B2): the server
+    registers/rotates a user's key on-chain in the background whenever a
+    public key is uploaded (at registration or via `POST /users/keys`),
+    and posts a `MessageReceipt` in the background after every accepted
+    upload/share. `GET /users/{username}?onchain=1` exposes a live registry
+    read (opt-in — see the rationale below); `GET /files/{id}/download` and
+    `.../blockchain-proof` expose receipt status. **No client yet performs
+    the pre-encrypt registry check or refuses on a revoked key** — that is
+    B3 (client integration); see the remediation map.
+    (d) **Shared-wallet nonce race, found and fixed during B2 integration
+    testing**: `MessageDigest`, `KeyRegistry`, and `MessageReceipt` are all
+    signed by the same registrar/deployer wallet, and a single upload fires
+    a digest-anchor thread and a receipt thread concurrently — both read
+    `get_transaction_count(..., "pending")` before broadcasting, which is
+    not atomic, so the second send was rejected ("nonce too low") when
+    tested against a live local node. Fixed with a process-wide lock held
+    only across the nonce-read→sign→broadcast step (not the slower
+    confirmation wait), shared by all three contracts' send paths.
+    (e) `?onchain=1` is opt-in on `GET /users/{username}` and not offered on
+    the bulk `GET /users` listing at all — a per-user live RPC read for a
+    500-row page would mean up to 500 sequential RPC calls per request.
+    On-chain lookups here fail open (`onchain: null` + `onchain_error`);
+    this is informational display, not the security gate — the client-side
+    pre-encrypt check that must fail closed is still B3.
 
 ---
 
@@ -602,8 +626,8 @@ legacy data in tests — but no shipped call site passes empty AAD.
 | Gap | Fix | When |
 |---|---|---|
 | §8.1 key pinning | **Done — both clients.** TOFU pin store (web: IndexedDB; C++: per-account pin file), hard block + fingerprint display on change, explicit override re-pins. Residual: first-contact trust (inherent to TOFU; blockchain registry would strengthen) | Web + C++ rework chunks (landed) |
-| §8.1 / §8.11 first-contact trust | `KeyRegistry.sol` deployed + unit-tested (register/rotate/revoke/getKey, 17 tests, all passing). Remaining: client integration (lookup + refuse-on-revoked before encrypt, fail-closed on RPC failure — matches the TOFU fail-closed pattern, not fail-open) | Blockchain sub-chunk B1 (landed) → B3 (client integration) |
-| §8.11 receipt evidence | `MessageReceipt.sol` deployed + unit-tested (postReceipt/getReceipt, replay-reverts, 9 tests). Remaining: server posts a receipt after each accepted upload; clients poll and surface confirmation/pending status (informational, fail-open acceptable) | Blockchain sub-chunk B1 (landed) → B2 (backend integration) |
+| §8.1 / §8.11 first-contact trust | `KeyRegistry.sol` deployed + unit-tested (B1). **Backend wired (B2)**: register/rotate posted on-chain in the background on every public-key upload; `?onchain=1` opt-in live lookup on `GET /users/{username}`, fails open with `onchain_error`. Remaining: client integration — lookup + refuse-on-revoked before encrypt, fail-closed on RPC failure (matches the TOFU fail-closed pattern, not fail-open) | B1 (landed) → B2 (landed) → B3 (client integration) |
+| §8.11 receipt evidence | `MessageReceipt.sol` deployed + unit-tested (B1). **Backend wired (B2)**: server posts a receipt in the background after every accepted upload/share; `GET /files/{id}/download` and `.../blockchain-proof` surface status (informational, fail-open). Remaining: clients poll after upload and surface confirmation/pending in the UI | B1 (landed) → B2 (landed) → B4 (UI) |
 | §8.4 AAD | **Done — enforcement live at every call site in both clients** (canonical username/filename form; file ID excluded — unbindable pre-upload; no AAD-less fallback). Residual: same-pair duplication | Web + C++ rework chunks (landed) |
 | §8.3 key-at-rest | **Done — both clients.** C++: Argon2id(passphrase, dedicated salt/params) → XSalsa20-Poly1305 key-wrap vault (secretbox chosen over AES-GCM so the vault opens without AES-NI). Web: PBKDF2-HMAC-SHA256 (600k, dedicated salt) → AES-256-GCM via `wrapKey`/`unwrapKey`; session key non-extractable; legacy keys replaced via upgrade flow. Residual: PBKDF2 not memory-hard (§8.3) | C++ + web key-vault chunks (landed) |
 | §8.6 upload cap | Enforced max upload size + documented limit | Files-router chunk |

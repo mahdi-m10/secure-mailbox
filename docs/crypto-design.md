@@ -618,6 +618,29 @@ legacy data in tests — but no shipped call site passes empty AAD.
     On-chain lookups here fail open (`onchain: null` + `onchain_error`);
     this is informational display, not the security gate — the client-side
     pre-encrypt check that must fail closed is still B3.
+    (f) **Client-side registry reads (B3a, landed)** deliberately bypass the
+    mailbox server entirely: each client computes `keccak256(username)`
+    itself (Keccak-256 implemented from scratch in both clients — no
+    browser or libsodium primitive provides the Ethereum variant, whose
+    0x01 padding predates and differs from standardized SHA-3's 0x06;
+    both implementations are tested against fixed vectors and against
+    values observed live on-chain), builds the `getKey(bytes32)` calldata
+    locally (hardcoded 4-byte selector, self-checked in tests against the
+    local Keccak), and issues `eth_call` directly against a **public,
+    keyless Sepolia RPC endpoint** (publicnode.com). Keyless is a
+    deliberate trade: an API-keyed provider URL embedded in page source or
+    a distributed binary leaks the key and shares one quota across all
+    clients. The cost, stated honestly: public endpoints are rate-limited
+    and offer no SLA — a busy or throttled endpoint degrades into the
+    RPC-failure path, which the pre-encrypt gate treats as FAIL CLOSED
+    (explicit typed override required, mirroring the TOFU-mismatch
+    pattern), so degraded RPC service degrades availability, never
+    security. Note also the residual: the client trusts the chosen RPC
+    node to answer `eth_call` honestly — a malicious RPC endpoint could
+    lie about registry state (light-client verification is far out of
+    scope); using a well-known public provider distinct from the mailbox
+    operator keeps the two trust domains separate, which is the property
+    that matters for this threat model.
 
 ---
 
@@ -626,7 +649,7 @@ legacy data in tests — but no shipped call site passes empty AAD.
 | Gap | Fix | When |
 |---|---|---|
 | §8.1 key pinning | **Done — both clients.** TOFU pin store (web: IndexedDB; C++: per-account pin file), hard block + fingerprint display on change, explicit override re-pins. Residual: first-contact trust (inherent to TOFU; blockchain registry would strengthen) | Web + C++ rework chunks (landed) |
-| §8.1 / §8.11 first-contact trust | `KeyRegistry.sol` deployed + unit-tested (B1). **Backend wired (B2)**: register/rotate posted on-chain in the background on every public-key upload; `?onchain=1` opt-in live lookup on `GET /users/{username}`, fails open with `onchain_error`. Remaining: client integration — lookup + refuse-on-revoked before encrypt, fail-closed on RPC failure (matches the TOFU fail-closed pattern, not fail-open) | B1 (landed) → B2 (landed) → B3 (client integration) |
+| §8.1 / §8.11 first-contact trust | `KeyRegistry.sol` deployed + unit-tested (B1). **Backend wired (B2)**: register/rotate posted on-chain in the background on every public-key upload; `?onchain=1` opt-in live lookup on `GET /users/{username}`, fails open with `onchain_error`. **Client read primitives (B3a)**: from-scratch Keccak-256 + direct `eth_call` in both clients, verified live against a seeded registry (registered/rotated/revoked/unregistered) and fail-closed on unreachable/unconfigured RPC. Remaining: wiring the pre-encrypt gate into the web (B3b) and C++ (B3c) flows — refuse on revoked, typed override on RPC failure | B1 → B2 → B3a (landed) → B3b/B3c |
 | §8.11 receipt evidence | `MessageReceipt.sol` deployed + unit-tested (B1). **Backend wired (B2)**: server posts a receipt in the background after every accepted upload/share; `GET /files/{id}/download` and `.../blockchain-proof` surface status (informational, fail-open). Remaining: clients poll after upload and surface confirmation/pending in the UI | B1 (landed) → B2 (landed) → B4 (UI) |
 | §8.4 AAD | **Done — enforcement live at every call site in both clients** (canonical username/filename form; file ID excluded — unbindable pre-upload; no AAD-less fallback). Residual: same-pair duplication | Web + C++ rework chunks (landed) |
 | §8.3 key-at-rest | **Done — both clients.** C++: Argon2id(passphrase, dedicated salt/params) → XSalsa20-Poly1305 key-wrap vault (secretbox chosen over AES-GCM so the vault opens without AES-NI). Web: PBKDF2-HMAC-SHA256 (600k, dedicated salt) → AES-256-GCM via `wrapKey`/`unwrapKey`; session key non-extractable; legacy keys replaced via upgrade flow. Residual: PBKDF2 not memory-hard (§8.3) | C++ + web key-vault chunks (landed) |

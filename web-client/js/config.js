@@ -9,3 +9,30 @@
 export const API = window.location.origin.startsWith('http')
   ? window.location.origin
   : 'https://team10.theburkenator.com';
+
+/**
+ * On-chain KeyRegistry configuration.
+ *
+ * The client reads the registry DIRECTLY over JSON-RPC — deliberately not
+ * via our own backend: a compromised server must not be able to answer its
+ * own integrity check (docs/crypto-design.md §8.11). The RPC endpoint is a
+ * public, keyless Sepolia node (publicnode.com): no API key to leak in
+ * page source, at the cost of public-endpoint rate limits — recorded as a
+ * known limitation in the design doc.
+ *
+ * localStorage overrides (sm_chain_rpc / sm_chain_registry) exist so the
+ * same build can point at a local Hardhat node during development and
+ * integration testing without editing source.
+ *
+ * KEY_REGISTRY_ADDRESS is set when the contract is deployed to Sepolia
+ * (deployment sub-chunk); until then it is empty and the chain check
+ * reports "unconfigured" (treated as an RPC failure: fail closed with an
+ * explicit override, never silently skipped).
+ */
+export const CHAIN = {
+  rpcUrl:
+    localStorage.getItem('sm_chain_rpc') ??
+    'https://ethereum-sepolia-rpc.publicnode.com',
+  keyRegistryAddress:
+    localStorage.getItem('sm_chain_registry') ?? '',
+};

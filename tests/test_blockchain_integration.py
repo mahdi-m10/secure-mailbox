@@ -340,3 +340,45 @@ def test_share_posts_receipt_naming_sharer_as_sender(
     # The sharer (bob) is the sender of the re-encrypted copy, not alice.
     mock_post.assert_called_once()
     assert mock_post.call_args.args[1:] == ("bob", "carol")
+
+
+# ---------------------------------------------------------------------------
+# Listing evidence fields (B4: inbox Etherscan badges)
+# ---------------------------------------------------------------------------
+
+def test_listings_carry_onchain_evidence_fields(
+    client, two_users, make_file_payload, db_session
+):
+    """Both listings expose eth_tx_hash (digest anchor, via the
+    BlockchainRecord join) and receipt_tx_hash so the mailbox UI can render
+    per-file evidence badges without one blockchain-proof call per row."""
+    res = client.post("/files/upload", json=make_file_payload("bob"),
+                      headers=two_users["alice"])
+    file_id = res.json()["id"]
+
+    from backend import models
+    rec = db_session.query(models.BlockchainRecord).filter_by(file_id=file_id).one()
+    rec.eth_tx_hash = "0x" + "ab" * 32
+    file_obj = db_session.get(models.FileObject, file_id)
+    file_obj.receipt_tx_hash = "0x" + "cd" * 32
+    db_session.commit()
+
+    shared = client.get("/files/shared", headers=two_users["bob"]).json()[0]
+    assert shared["eth_tx_hash"] == "0x" + "ab" * 32
+    assert shared["receipt_tx_hash"] == "0x" + "cd" * 32
+
+    owned = client.get("/files/owned", headers=two_users["alice"]).json()[0]
+    assert owned["eth_tx_hash"] == "0x" + "ab" * 32
+    assert owned["receipt_tx_hash"] == "0x" + "cd" * 32
+
+
+def test_listing_evidence_fields_null_before_anchoring(
+    client, two_users, make_file_payload
+):
+    """Fresh upload with no chain config: both evidence fields are null,
+    and the listing must not error on the missing values."""
+    client.post("/files/upload", json=make_file_payload("bob"),
+                headers=two_users["alice"])
+    shared = client.get("/files/shared", headers=two_users["bob"]).json()[0]
+    assert shared["eth_tx_hash"] is None
+    assert shared["receipt_tx_hash"] is None

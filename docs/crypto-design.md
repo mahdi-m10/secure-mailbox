@@ -656,6 +656,19 @@ legacy data in tests — but no shipped call site passes empty AAD.
     confirmation after upload is the deliberate opposite posture —
     fail-open, informational polling that never blocks (docs note: it is
     evidence display, not a control).
+    (h) **Key Verification Page + inbox evidence (B4, landed).** A dedicated
+    page (`verify-key.html`) looks a user up and shows a verdict across three
+    independent sources: the on-chain registry read directly from Sepolia,
+    the server's current key, and this browser's TOFU pin (read-only —
+    viewing never creates a pin). It surfaces the identity hash
+    (`keccak256(username)`, since accounts hold no Ethereum address under the
+    registrar model), the registry contract and registration-tx Etherscan
+    links, and the tx's block number (a second direct
+    `eth_getTransactionReceipt` call). The mailbox listings gained
+    `eth_tx_hash` / `receipt_tx_hash` (additive) so each file row renders
+    "anchored" / "receipt" / "pending" evidence badges linking to Etherscan
+    — no per-row API call. All read-only display; nothing here is a security
+    control (the enforcing gate is B3b/B3c).
 
 ---
 

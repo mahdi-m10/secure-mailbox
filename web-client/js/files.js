@@ -172,6 +172,33 @@ function renderActiveTab() {
   });
 }
 
+// Per-file on-chain evidence badges (B4). Each is an Etherscan tx link when
+// a hash exists, or a neutral "pending" pill otherwise. Data comes from the
+// listing fields eth_tx_hash (MessageDigest anchor) and receipt_tx_hash
+// (MessageReceipt) — no per-row API call.
+const ETHERSCAN_TX = 'https://sepolia.etherscan.io/tx/';
+
+function evidenceBadges(f) {
+  const badge = (txHash, okLabel, title) => {
+    if (txHash && txHash !== 'duplicate') {
+      return `<a class="ev-badge ok" href="${ETHERSCAN_TX}${esc(txHash)}" target="_blank"
+                 rel="noopener noreferrer" title="${title}: ${esc(txHash)}">
+                <i data-lucide="circle-check"></i>${okLabel}
+                <i data-lucide="external-link" style="width:11px;height:11px"></i></a>`;
+    }
+    if (txHash === 'duplicate') {
+      return `<span class="ev-badge ok" title="${title}: hash already anchored by an earlier transaction">
+                <i data-lucide="circle-check"></i>${okLabel}</span>`;
+    }
+    return `<span class="ev-badge pending" title="${title}: not yet posted on-chain">
+              <i data-lucide="clock"></i>pending</span>`;
+  };
+  return `<div class="ev-badges">
+    ${badge(f.eth_tx_hash, 'anchored', 'MessageDigest integrity anchor')}
+    ${badge(f.receipt_tx_hash, 'receipt', 'MessageReceipt inclusion receipt')}
+  </div>`;
+}
+
 function renderSharedRow(f) {
   return `<div class="file-row ${f.is_read ? '' : 'unread'}" data-file-id="${f.id}">
     <div class="file-icon"><i data-lucide="file-lock-2"></i></div>
@@ -184,6 +211,7 @@ function renderSharedRow(f) {
         from <strong>${esc(f.owner_username ?? 'unknown')}</strong>
         · ${fmtSize(f.size_bytes)} · ${fmtDate(f.created_at)}
       </div>
+      ${evidenceBadges(f)}
     </div>
     <div class="file-actions">
       <button class="b-action-btn" data-action="download" title="Decrypt & download">
@@ -208,6 +236,7 @@ function renderOwnedRow(f) {
         to <strong>${esc(f.recipient_username ?? 'unknown')}</strong>
         · ${fmtSize(f.size_bytes)} · ${fmtDate(f.created_at)}
       </div>
+      ${evidenceBadges(f)}
     </div>
     <div class="file-actions">
       <button class="b-action-btn" data-action="revoke" title="Remove all recipients' access">

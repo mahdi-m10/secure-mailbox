@@ -41,6 +41,18 @@
       overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
     }
     .file-sub  { font-size: 12px; color: var(--slate-500, #64748b); margin-top: 2px; }
+
+    /* ── On-chain evidence badges (B4) ──────────────────────────── */
+    .ev-badges { display: flex; gap: 6px; margin-top: 6px; flex-wrap: wrap; }
+    .ev-badge {
+      display: inline-flex; align-items: center; gap: 4px;
+      font-size: 10.5px; font-weight: 700; text-transform: uppercase; letter-spacing: .03em;
+      border-radius: 6px; padding: 2px 7px; text-decoration: none;
+    }
+    .ev-badge svg { width: 12px; height: 12px; }
+    .ev-badge.ok      { background: rgba(16,185,129,.12); color: #047857; }
+    .ev-badge.ok:hover{ background: rgba(16,185,129,.20); }
+    .ev-badge.pending { background: var(--slate-100, #f1f5f9); color: var(--slate-500, #64748b); }
     .file-tag {
       font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: .04em;
       background: var(--slate-100, #f1f5f9); color: var(--slate-500, #64748b);
@@ -170,9 +182,13 @@
         <button class="file-tab active" data-tab="shared">Shared with me</button>
         <button class="file-tab" data-tab="owned">My uploads</button>
       </div>
-      <a href="verify.html" class="btn-verify" style="margin-left:auto">
+      <a href="verify-key.html" class="btn-verify" style="margin-left:auto">
+        <i data-lucide="shield-check"></i>
+        Verify Key
+      </a>
+      <a href="verify.html" class="btn-verify" style="margin-left:8px">
         <i data-lucide="shield"></i>
-        Verify Integrity
+        Verify File
       </a>
     </header>
 

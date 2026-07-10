@@ -336,6 +336,23 @@ export async function checkTofuPin(myUsername, peerUsername, fetchedKeyB64) {
 }
 
 /**
+ * Read the stored pin for (me, peer) WITHOUT the first-use side effect of
+ * checkTofuPin — for read-only displays (e.g. the key-verification page)
+ * that must never create a pin just by looking.
+ *
+ * @returns {{publicKeyB64: string, firstSeen: string} | null}
+ */
+export async function getPin(myUsername, peerUsername) {
+  const db = await _openDB();
+  return new Promise((resolve, reject) => {
+    const req = db.transaction(_PIN_STORE, 'readonly').objectStore(_PIN_STORE)
+      .get(`${myUsername}|${peerUsername}`);
+    req.onsuccess = () => resolve(req.result ?? null);
+    req.onerror   = () => reject(req.error);
+  });
+}
+
+/**
  * Replace the pin for (me, peer) — call ONLY after the user explicitly
  * confirmed they trust the new key in the mismatch warning dialog.
  */

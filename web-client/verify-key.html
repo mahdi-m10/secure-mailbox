@@ -1,0 +1,157 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>SecureMailbox — Verify Key</title>
+  <link rel="stylesheet" href="css/style.css">
+  <style>
+    /* Page-scoped: verdict banner reuses result-banner; a few key-specific bits. */
+    .kv-fp { font-family: ui-monospace, monospace; font-size: 12px; word-break: break-all; }
+    .kv-pill {
+      display: inline-block; font-size: 11px; font-weight: 700; text-transform: uppercase;
+      letter-spacing: .04em; border-radius: 6px; padding: 2px 8px; vertical-align: 2px;
+    }
+    .kv-pill.ok      { background: rgba(16,185,129,.14); color: #047857; }
+    .kv-pill.warn    { background: rgba(234,179,8,.16);  color: #a16207; }
+    .kv-pill.bad     { background: rgba(220,38,38,.12);  color: #dc2626; }
+    .kv-pill.neutral { background: var(--slate-100,#f1f5f9); color: var(--slate-500,#64748b); }
+    .kv-source-note { font-size: 12px; color: var(--slate-400,#94a3b8); margin: 2px 0 14px; }
+  </style>
+</head>
+<body class="verify-page">
+
+  <!-- ── Navbar ── -->
+  <nav class="verify-navbar">
+    <a href="files.html" class="nav-logo">
+      <div class="logo-icon">
+        <i data-lucide="lock-keyhole"></i>
+      </div>
+      SecureMailbox
+    </a>
+    <div class="nav-links">
+      <a href="files.html">Files</a>
+      <a href="verify.html">Verify File</a>
+      <a href="index.html">Sign out</a>
+    </div>
+  </nav>
+
+  <!-- ── Main content ── -->
+  <main class="verify-main">
+    <div class="verify-container">
+
+      <h1>Key Verification</h1>
+      <p>
+        Cross-check a user's encryption key against the on-chain
+        <strong>KeyRegistry</strong> transparency log on Ethereum Sepolia.
+        This reads the blockchain <em>directly from your browser</em> — not
+        through the mailbox server — and compares what the chain publicly
+        records against what the server currently reports, so a server that
+        substitutes a key is caught.
+      </p>
+      <p class="kv-source-note">
+        Users are identified on-chain by <code>keccak256(username)</code>
+        (the “identity hash” below) rather than by an Ethereum address, since
+        accounts do not hold wallets — the server’s registrar wallet posts
+        registrations on their behalf.
+      </p>
+
+      <!-- Lookup form -->
+      <div class="verify-card">
+        <h2>Look Up a User</h2>
+        <form id="kv-form" novalidate>
+          <div class="form-group">
+            <label for="kv-username">Username</label>
+            <input id="kv-username" type="text" placeholder="e.g. alice"
+                   autocomplete="off" required>
+          </div>
+
+          <div id="kv-error" class="alert alert-error" style="display:none"></div>
+
+          <div class="verify-btn-row">
+            <button type="submit" id="kv-btn" class="btn btn-primary">
+              <i data-lucide="shield-check"></i>
+              Verify Key
+            </button>
+            <span style="font-size:12px;color:var(--slate-400)">
+              Reads Sepolia directly from your browser
+            </span>
+          </div>
+        </form>
+      </div>
+
+      <!-- ── Result (hidden until a check runs) ── -->
+      <div id="kv-result" class="verify-result">
+        <div class="verify-result-card">
+
+          <div id="kv-banner" class="result-banner">
+            <div id="kv-icon" class="result-icon"></div>
+            <div>
+              <div id="kv-title"    class="result-title"></div>
+              <div id="kv-subtitle" class="result-subtitle"></div>
+            </div>
+          </div>
+
+          <div class="result-details">
+
+            <!-- On-chain record -->
+            <div class="result-section-label">On-Chain Registry Record (read directly from Sepolia)</div>
+            <div class="hash-row">
+              <label>Status</label>
+              <div id="kv-onchain-status" class="hash-value">—</div>
+            </div>
+            <div class="hash-row">
+              <label>Key fingerprint (SHA-256 of the X25519 public key)</label>
+              <div id="kv-onchain-fp" class="hash-value kv-fp">—</div>
+            </div>
+            <div class="hash-row">
+              <label>Registry version</label>
+              <div id="kv-version">—</div>
+            </div>
+            <div class="hash-row">
+              <label>Last updated on-chain</label>
+              <div id="kv-updated">—</div>
+            </div>
+
+            <!-- Server's view -->
+            <div class="result-section-label" style="margin-top:20px">Server's Current View</div>
+            <div class="hash-row">
+              <label>Key fingerprint the server reports</label>
+              <div id="kv-server-fp" class="hash-value kv-fp">—</div>
+            </div>
+            <div class="hash-row">
+              <label>Your pinned key (this browser, TOFU)</label>
+              <div id="kv-pin" class="hash-value">—</div>
+            </div>
+
+            <!-- On-chain evidence links -->
+            <div class="result-section-label" style="margin-top:20px">Blockchain Evidence (Sepolia)</div>
+            <div class="hash-row">
+              <label>Identity hash (keccak256 of username)</label>
+              <div id="kv-identity" class="hash-value kv-fp">—</div>
+            </div>
+            <div class="hash-row">
+              <label>KeyRegistry contract</label>
+              <div id="kv-contract" class="hash-value">—</div>
+            </div>
+            <div class="hash-row">
+              <label>Registration / rotation transaction</label>
+              <div id="kv-tx" class="hash-value">—</div>
+            </div>
+            <div class="hash-row">
+              <label>Block number</label>
+              <div id="kv-block">—</div>
+            </div>
+
+          </div><!-- /.result-details -->
+        </div><!-- /.verify-result-card -->
+      </div><!-- /#kv-result -->
+
+    </div><!-- /.verify-container -->
+  </main>
+
+  <script src="./js/lucide-icons.js"></script>
+  <script>lucide.createIcons();</script>
+  <script type="module" src="js/verify-key.js"></script>
+</body>
+</html>

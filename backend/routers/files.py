@@ -573,9 +573,12 @@ def list_shared_files(
     Files are returned newest-first.  Fetching the listing does NOT mark
     files as read; that happens only on `/download`.
     """
-    # Single JOIN query to avoid N+1 lookups for owner usernames.
+    # Single JOIN query to avoid N+1 lookups for owner usernames; the
+    # BlockchainRecord outer join carries the digest-anchor tx hash so the
+    # inbox can render per-file on-chain evidence badges without extra calls.
     stmt = (
-        select(models.FileObject, models.FileAccess, models.User)
+        select(models.FileObject, models.FileAccess, models.User,
+               models.BlockchainRecord)
         .join(
             models.FileAccess,
             models.FileAccess.file_id == models.FileObject.id,
@@ -583,6 +586,10 @@ def list_shared_files(
         .outerjoin(
             models.User,
             models.User.id == models.FileObject.owner_id,
+        )
+        .outerjoin(
+            models.BlockchainRecord,
+            models.BlockchainRecord.file_id == models.FileObject.id,
         )
         .where(
             models.FileAccess.recipient_id == current_user.id,
@@ -608,8 +615,10 @@ def list_shared_files(
             "is_deleted":      file_obj.is_deleted,
             "is_forwarded":    bool(file_obj.is_forwarded),
             "created_at":      file_obj.created_at,
+            "eth_tx_hash":     chain_rec.eth_tx_hash if chain_rec else None,
+            "receipt_tx_hash": file_obj.receipt_tx_hash,
         }
-        for file_obj, access, owner in rows
+        for file_obj, access, owner, chain_rec in rows
     ]
 
 
@@ -654,7 +663,7 @@ def list_owned_files(
     # access control, not deletion; an inner join here silently hid fully
     # revoked files from their owner).
     stmt = (
-        select(models.FileObject, RecipientUser)
+        select(models.FileObject, RecipientUser, models.BlockchainRecord)
         .outerjoin(first_access_sq, first_access_sq.c.file_id == models.FileObject.id)
         .outerjoin(
             models.FileAccess,
@@ -663,6 +672,10 @@ def list_owned_files(
         .outerjoin(
             RecipientUser,
             RecipientUser.id == models.FileAccess.recipient_id,
+        )
+        .outerjoin(
+            models.BlockchainRecord,
+            models.BlockchainRecord.file_id == models.FileObject.id,
         )
         .where(
             models.FileObject.owner_id == current_user.id,
@@ -687,8 +700,10 @@ def list_owned_files(
             "is_read":            True,   # owner has trivially "read" their own upload
             "is_deleted":         file_obj.is_deleted,
             "created_at":         file_obj.created_at,
+            "eth_tx_hash":        chain_rec.eth_tx_hash if chain_rec else None,
+            "receipt_tx_hash":    file_obj.receipt_tx_hash,
         }
-        for file_obj, recipient in rows
+        for file_obj, recipient, chain_rec in rows
     ]
 
 

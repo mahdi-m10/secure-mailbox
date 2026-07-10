@@ -641,6 +641,21 @@ legacy data in tests — but no shipped call site passes empty AAD.
     scope); using a well-known public provider distinct from the mailbox
     operator keeps the two trust domains separate, which is the property
     that matters for this threat model.
+    (g) **Client gates wired (B3b web, B3c C++, landed).** Both clients now
+    run the registry check as a second, independent defence after the TOFU
+    pin, at every encrypt and decrypt call site. Identical outcome table in
+    both: RPC failure/unconfigured → fail closed (explicit typed override);
+    revoked key on **encrypt** → hard block with NO override; revoked on
+    **decrypt** → override allowed (the file may predate the revocation and
+    old mail must stay readable); not-registered → soft notice (pre-registry
+    accounts have no record); server key ≠ on-chain key → override showing
+    both fingerprints (recent rotation lag, or substitution). Verified
+    end-to-end against a live local node driving the real UI / CLI: a
+    revoked recipient is blocked before any encryption occurs, and an
+    unreachable RPC aborts unless the user types the override. Receipt
+    confirmation after upload is the deliberate opposite posture —
+    fail-open, informational polling that never blocks (docs note: it is
+    evidence display, not a control).
 
 ---
 
@@ -649,7 +664,7 @@ legacy data in tests — but no shipped call site passes empty AAD.
 | Gap | Fix | When |
 |---|---|---|
 | §8.1 key pinning | **Done — both clients.** TOFU pin store (web: IndexedDB; C++: per-account pin file), hard block + fingerprint display on change, explicit override re-pins. Residual: first-contact trust (inherent to TOFU; blockchain registry would strengthen) | Web + C++ rework chunks (landed) |
-| §8.1 / §8.11 first-contact trust | `KeyRegistry.sol` deployed + unit-tested (B1). **Backend wired (B2)**: register/rotate posted on-chain in the background on every public-key upload; `?onchain=1` opt-in live lookup on `GET /users/{username}`, fails open with `onchain_error`. **Client read primitives (B3a)**: from-scratch Keccak-256 + direct `eth_call` in both clients, verified live against a seeded registry (registered/rotated/revoked/unregistered) and fail-closed on unreachable/unconfigured RPC. Remaining: wiring the pre-encrypt gate into the web (B3b) and C++ (B3c) flows — refuse on revoked, typed override on RPC failure | B1 → B2 → B3a (landed) → B3b/B3c |
+| §8.1 / §8.11 first-contact trust | `KeyRegistry.sol` (B1). Backend register/rotate + `?onchain=1` lookup (B2). Client read primitives — from-scratch Keccak-256 + direct `eth_call` (B3a). **Pre-encrypt gate wired into both clients (B3b web, B3c C++, landed)**: independent second defence after TOFU; revoked-encrypt hard-blocks, RPC failure fails closed with typed override; verified end-to-end (revoked recipient blocked before encryption; unreachable RPC aborts). Residual: first-registration trust and the trusted-RPC assumption (§8.11(f)) | B1 → B2 → B3a → B3b/B3c (all landed) |
 | §8.11 receipt evidence | `MessageReceipt.sol` deployed + unit-tested (B1). **Backend wired (B2)**: server posts a receipt in the background after every accepted upload/share; `GET /files/{id}/download` and `.../blockchain-proof` surface status (informational, fail-open). Remaining: clients poll after upload and surface confirmation/pending in the UI | B1 (landed) → B2 (landed) → B4 (UI) |
 | §8.4 AAD | **Done — enforcement live at every call site in both clients** (canonical username/filename form; file ID excluded — unbindable pre-upload; no AAD-less fallback). Residual: same-pair duplication | Web + C++ rework chunks (landed) |
 | §8.3 key-at-rest | **Done — both clients.** C++: Argon2id(passphrase, dedicated salt/params) → XSalsa20-Poly1305 key-wrap vault (secretbox chosen over AES-GCM so the vault opens without AES-NI). Web: PBKDF2-HMAC-SHA256 (600k, dedicated salt) → AES-256-GCM via `wrapKey`/`unwrapKey`; session key non-extractable; legacy keys replaced via upgrade flow. Residual: PBKDF2 not memory-hard (§8.3) | C++ + web key-vault chunks (landed) |

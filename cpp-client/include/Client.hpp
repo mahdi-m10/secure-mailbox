@@ -75,6 +75,17 @@ public:
     std::optional<File> download_file(int file_id);
     bool                delete_file  (int file_id);                // owner-only soft delete
 
+    // On-chain MessageReceipt status for a file, read via
+    // GET /files/{id}/blockchain-proof. Informational (fail-open) — used to
+    // report whether the server posted a receipt after an accepted upload.
+    struct ReceiptStatus {
+        bool        queried{false};   // false → the request itself failed
+        bool        confirmed{false}; // receipt exists on-chain
+        std::string tx_hash;          // posting tx, if the server recorded one
+        std::int64_t block_number{0}; // block the receipt landed in (when confirmed)
+    };
+    ReceiptStatus get_receipt_status(int file_id);
+
     // POST /files/{id}/share — re-encryption path: the sharer decrypted the
     // file locally and re-encrypted it for the new recipient.
     bool share_file(int file_id,

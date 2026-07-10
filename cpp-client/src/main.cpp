@@ -14,6 +14,7 @@
 //     hard-blocks the operation unless the user types an explicit override
 //     phrase, which re-pins.
 
+#include <chrono>
 #include <cstdint>
 #include <cstdlib>
 #include <filesystem>
@@ -22,7 +23,9 @@
 #include <optional>
 #include <string>
 #include <vector>
+#include <thread>
 #include <sodium.h>
+#include "Chain.hpp"
 #include "Client.hpp"
 #include "Crypto.hpp"
 #include "File.hpp"
@@ -117,22 +120,110 @@ struct Session {
     FileStore                 owned_store;    // my uploads
     std::optional<crypto::Keypair> keypair;   // set only after a vault unlock
     std::unique_ptr<PinStore> pins;           // constructed after login (per account)
+    std::unique_ptr<ChainClient> chain;       // on-chain KeyRegistry reads
 
     bool crypto_ready() const { return keypair.has_value(); }
 };
 
+// Which trust posture the on-chain gate takes. Encrypt = pre-encrypt
+// security gate (upload/share) — strictest, per the blockchain brief.
+// Decrypt = sender-key cross-check on download.
+enum class ChainMode { Encrypt, Decrypt };
+
+// On-chain KeyRegistry gate, run AFTER the TOFU check. Returns true to
+// proceed, false to abort. Outcomes mirror the web client's chainGate()
+// exactly (docs/crypto-design.md §8.11):
+//   RPC failure / unconfigured → FAIL CLOSED (typed override, like TOFU)
+//   revoked + Encrypt          → HARD BLOCK, no override
+//   revoked + Decrypt          → warn + override (file may predate revocation)
+//   not registered             → soft notice, proceed
+//   chain key ≠ server key      → warn + override (rotation lag or substitution)
+//   registered + clean match   → proceed silently
+static bool chain_gate(Session& sess, const std::string& peer,
+                       const std::string& server_key_b64, ChainMode mode) {
+    const OnChainKey rec = sess.chain->get_onchain_key(peer);
+
+    if (!rec.ok) {
+        std::cout << "\n"
+                  << "  On-chain key check unavailable for '" << peer << "':\n"
+                  << "    " << rec.reason << "\n"
+                  << "  This check detects server key-substitution. An attacker who can\n"
+                  << "  block access to the blockchain could be causing this deliberately.\n\n";
+        const std::string answer = cli::prompt(
+            "Type exactly 'proceed anyway' to continue WITHOUT it, anything else aborts: ");
+        if (answer != "proceed anyway") {
+            std::cout << "Aborted — on-chain check could not be completed.\n";
+            return false;
+        }
+        std::cout << "[chain] Proceeding WITHOUT on-chain verification for '" << peer << "'.\n";
+        return true;
+    }
+
+    if (!rec.registered) {
+        std::cout << "[chain] '" << peer << "' has no on-chain key record yet "
+                  << "(pre-registry account) — TOFU pin is the active protection.\n";
+        return true;
+    }
+
+    if (rec.revoked) {
+        if (mode == ChainMode::Encrypt) {
+            std::cout << "\n"
+                      << "  BLOCKED: '" << peer << "'s key is marked REVOKED in the on-chain\n"
+                      << "  registry (typically key compromise or account retirement).\n"
+                      << "  Encrypting new files to a revoked key is not allowed.\n";
+            return false;   // no override for revoked-encrypt
+        }
+        std::cout << "\n"
+                  << "  WARNING: '" << peer << "'s key is REVOKED on-chain. This file may\n"
+                  << "  predate the revocation (old mail stays readable), but content signed\n"
+                  << "  by a revoked key could also be forged by whoever caused the revocation.\n\n";
+        const std::string answer = cli::prompt(
+            "Type exactly 'decrypt anyway' to continue, anything else aborts: ");
+        if (answer != "decrypt anyway") {
+            std::cout << "Aborted — sender key is revoked on-chain.\n";
+            return false;
+        }
+        return true;
+    }
+
+    if (rec.key_b64 != server_key_b64) {
+        std::cout << "\n"
+                  << "  WARNING: the key the server returned for '" << peer << "' does NOT\n"
+                  << "  match the on-chain registry (registry version " << rec.version << ").\n"
+                  << "    On-chain registry key : " << crypto::key_fingerprint(rec.key_b64) << "\n"
+                  << "    Key the server returned: " << crypto::key_fingerprint(server_key_b64) << "\n\n"
+                  << "  Either a very recent key rotation whose on-chain update has not landed,\n"
+                  << "  or the server substituting a key. Verify with '" << peer << "' out-of-band.\n\n";
+        const std::string answer = cli::prompt(
+            "Type exactly 'trust server key' to continue, anything else aborts: ");
+        if (answer != "trust server key") {
+            std::cout << "Aborted — server key contradicts the on-chain registry.\n";
+            return false;
+        }
+        std::cout << "[chain] Proceeding with the server's key for '" << peer << "'.\n";
+        return true;
+    }
+
+    // Registered, not revoked, server key matches the public log.
+    return true;
+}
+
 // ── TOFU gate ─────────────────────────────────────────────────────────────────
 
-// Fetch `peer`'s public key from the server and verify it against the local
-// TOFU pin store.  This is the single chokepoint every encrypt AND decrypt
-// path goes through — there is no way to use a peer key without it.
+// Fetch `peer`'s public key and enforce BOTH trust checks, in order:
+//   1. TOFU pin (local history) — first-use pins, match proceeds, mismatch
+//      hard-blocks behind an explicit typed override.
+//   2. On-chain KeyRegistry cross-check (chain_gate), read directly from
+//      Sepolia — see chain_gate() for the outcome table.
+// The two are independent defences: TOFU compares against what THIS device
+// saw before; the registry against what the server publicly committed to.
+// There is no way to use a peer key without passing both.
 //
-// First use: pin and proceed (with a notice).
-// Match:     proceed silently.
-// Mismatch:  print both fingerprints and refuse unless the user types the
-//            exact override phrase; overriding re-pins the new key.
-static std::optional<crypto::Bytes> get_verified_peer_key(Session& sess,
-                                                          const std::string& peer) {
+// `mode` distinguishes the pre-encrypt security gate (upload/share) from the
+// sender-key cross-check on download — only the chain step differs on a
+// revoked key (encrypt hard-blocks; decrypt allows an informed override).
+static std::optional<crypto::Bytes> get_verified_peer_key(
+    Session& sess, const std::string& peer, ChainMode mode) {
     auto user_opt = sess.client.get_user(peer);
     if (!user_opt || !user_opt->has_public_key()) {
         std::cout << "User '" << peer << "' not found or has no public key.\n";
@@ -155,14 +246,14 @@ static std::optional<crypto::Bytes> get_verified_peer_key(Session& sess,
     const auto result = sess.pins->check(peer, key_b64);
     switch (result.status) {
         case PinStore::Status::Match:
-            return key;
+            break;   // fall through to the chain gate
 
         case PinStore::Status::FirstUse:
             sess.pins->pin(peer, key_b64);
             std::cout << "[TOFU] First contact with '" << peer << "' — key pinned.\n"
                       << "       Fingerprint: " << crypto::key_fingerprint(key_b64) << "\n"
                       << "       Verify this out-of-band with them if the file is sensitive.\n";
-            return key;
+            break;
 
         case PinStore::Status::Mismatch: {
             std::cout << "\n"
@@ -185,10 +276,15 @@ static std::optional<crypto::Bytes> get_verified_peer_key(Session& sess,
             }
             sess.pins->pin(peer, key_b64);
             std::cout << "[TOFU] New key pinned for '" << peer << "'.\n";
-            return key;
+            break;
         }
     }
-    return std::nullopt;  // unreachable
+
+    // Second, independent defence: the on-chain transparency log.
+    if (!chain_gate(sess, peer, key_b64, mode)) {
+        return std::nullopt;
+    }
+    return key;
 }
 
 // ── Vault / key management ────────────────────────────────────────────────────
@@ -367,6 +463,33 @@ static std::optional<crypto::Bytes> read_local_file(const fs::path& path) {
     return data;
 }
 
+// After a successful upload, watch for the server's on-chain MessageReceipt.
+// Purely informational and fail-OPEN — the opposite posture from the
+// pre-encrypt chain_gate: the server posts the receipt in the background and
+// Sepolia blocks land every ~12 s, so this polls a few times with backoff
+// and reports what it finds; every failure mode just ends in "not confirmed
+// yet". This is evidence display, NOT a security control. Runs inline (the
+// CLI is between menu actions anyway), so the user sees the confirmation.
+static void poll_receipt_status(Session& sess, int file_id) {
+    const int delays_s[] = {3, 4, 5, 6};   // ~18 s total
+    for (const int delay : delays_s) {
+        std::this_thread::sleep_for(std::chrono::seconds(delay));
+        const auto st = sess.client.get_receipt_status(file_id);
+        if (!st.queried) continue;   // transient — keep trying
+        if (st.confirmed) {
+            std::cout << "[receipt] On-chain receipt confirmed for file #" << file_id
+                      << " (block " << st.block_number << ").\n";
+            return;
+        }
+        if (!st.tx_hash.empty()) {
+            std::cout << "[receipt] Receipt posted for file #" << file_id
+                      << " (tx " << st.tx_hash.substr(0, 12) << "…) — awaiting confirmation.\n";
+        }
+    }
+    std::cout << "[receipt] No on-chain receipt for file #" << file_id
+              << " yet — check the verify page later.\n";
+}
+
 static void do_upload(Session& sess) {
     cli::header("Encrypt & upload a file (HPKE Mode_Auth)");
 
@@ -387,7 +510,7 @@ static void do_upload(Session& sess) {
     }
 
     const std::string recipient = cli::prompt("Recipient username: ");
-    auto recipient_key = get_verified_peer_key(sess, recipient);
+    auto recipient_key = get_verified_peer_key(sess, recipient, ChainMode::Encrypt);
     if (!recipient_key) return;
 
     auto plaintext = read_local_file(path);
@@ -419,6 +542,7 @@ static void do_upload(Session& sess) {
     auto id = sess.client.upload_file(recipient, payload);
     if (id) {
         std::cout << "Uploaded as file #" << *id << " for " << recipient << ".\n";
+        poll_receipt_status(sess, *id);
     }
 }
 
@@ -460,7 +584,7 @@ fetch_and_decrypt(Session& sess, int file_id) {
 
     // TOFU gate on the sender's key — a substituted key fails here, before
     // any cryptography runs.
-    auto owner_key = get_verified_peer_key(sess, owner);
+    auto owner_key = get_verified_peer_key(sess, owner, ChainMode::Decrypt);
     if (!owner_key) return std::nullopt;
 
     // Rebuild the canonical AAD LOCALLY from download metadata + our own
@@ -535,7 +659,7 @@ static void do_share(Session& sess) {
         std::cout << "That's you.\n";
         return;
     }
-    auto recipient_key = get_verified_peer_key(sess, new_recipient);
+    auto recipient_key = get_verified_peer_key(sess, new_recipient, ChainMode::Encrypt);
     if (!recipient_key) return;
 
     // Fresh encapsulation with a new AAD naming US as the sender — the
@@ -711,7 +835,8 @@ int main(int argc, char* argv[]) {
                   << "(The key vault itself uses XSalsa20-Poly1305 and still works.)\n\n";
     }
 
-    Session sess{Client{cfg}, {}, {}, std::nullopt, nullptr};
+    Session sess{Client{cfg}, {}, {}, std::nullopt, nullptr,
+                 std::make_unique<ChainClient>()};
 
     while (true) {
         const int choice = cli::menu_choice("Main Menu", {

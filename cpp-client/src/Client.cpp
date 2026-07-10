@@ -346,6 +346,31 @@ bool Client::delete_file(int file_id) {
     return true;
 }
 
+Client::ReceiptStatus Client::get_receipt_status(int file_id) {
+    // Informational / fail-open: any failure just yields queried=false, never
+    // an error to the caller. The blockchain-proof endpoint returns
+    //   receipt:        live MessageReceipt.getReceipt() {exists, block_number}
+    //   receipt_tx_hash: the posting tx recorded in the DB, if any
+    ReceiptStatus st;
+    const std::string path = "/files/" + std::to_string(file_id) + "/blockchain-proof";
+    auto resp = request("GET", path);
+    if (resp.status_code != 200) return st;
+
+    try {
+        auto j = json::parse(resp.body);
+        st.queried = true;
+        st.tx_hash = opt<std::string>(j, "receipt_tx_hash").value_or("");
+        if (j.contains("receipt") && j["receipt"].is_object()) {
+            const auto& r = j["receipt"];
+            st.confirmed = r.value("exists", false);
+            if (st.confirmed) st.block_number = r.value("block_number", std::int64_t{0});
+        }
+    } catch (const std::exception&) {
+        st.queried = false;
+    }
+    return st;
+}
+
 bool Client::share_file(int file_id,
                         const std::string& recipient_username,
                         const std::string& new_ciphertext_b64,

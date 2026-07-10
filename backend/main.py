@@ -86,7 +86,7 @@ async def security_headers(request: Request, call_next):
     # reads the KeyRegistry contract DIRECTLY (docs/crypto-design.md
     # §8.11(f)) — proxying that check through this server would let a
     # compromised server answer its own integrity check.
-    response.headers["Content-Security-Policy"] = "default-src 'self'; script-src 'self' 'unsafe-inline' https://unpkg.com; style-src 'self' 'unsafe-inline'; connect-src 'self' https://team10.theburkenator.com https://ethereum-sepolia-rpc.publicnode.com"
+    response.headers["Content-Security-Policy"] = "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; connect-src 'self' https://team10.theburkenator.com https://ethereum-sepolia-rpc.publicnode.com"
     response.headers["X-Content-Type-Options"] = "nosniff"
     response.headers["X-Frame-Options"] = "DENY"
     response.headers["Referrer-Policy"] = "no-referrer"

@@ -27,9 +27,10 @@
 
 struct ChainConfig {
     std::string rpc_url{"https://ethereum-sepolia-rpc.publicnode.com"};
-    // Set once KeyRegistry is deployed to Sepolia (deployment sub-chunk).
+    // Live KeyRegistry deployment on Sepolia (docs/deployment.md). Override
+    // via SECUREMAILBOX_KEY_REGISTRY (e.g. a local Hardhat node for tests).
     // Empty = unconfigured; lookups report an error (callers fail closed).
-    std::string key_registry_address{};
+    std::string key_registry_address{"0x230c56Ab59535625c8eAeF18f8394b7D222a889D"};
 
     // Apply SECUREMAILBOX_RPC_URL / SECUREMAILBOX_KEY_REGISTRY env overrides.
     static ChainConfig from_env();

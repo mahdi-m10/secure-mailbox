@@ -669,6 +669,23 @@ legacy data in tests — but no shipped call site passes empty AAD.
     "anchored" / "receipt" / "pending" evidence badges linking to Etherscan
     — no per-row API call. All read-only display; nothing here is a security
     control (the enforcing gate is B3b/B3c).
+    (i) **Live Sepolia deployment (B5, landed).** `KeyRegistry` and
+    `MessageReceipt` are deployed to Sepolia and the full lifecycle exercised
+    on-chain — register → rotate → revoke on one identity, plus a posted
+    receipt — each a real signed transaction (addresses, tx hashes, block
+    numbers and Etherscan links in docs/deployment.md; verification procedure
+    and results in docs/test-plan.md). The observed lifecycle matches the
+    contract invariants: registration lands at version 1, rotation bumps to
+    version 2, revocation preserves the record with `revoked = true` (so
+    clients still distinguish "revoked" from "never registered"), and the
+    receipt reads back `exists = true`. Both clients now default to the live
+    `KeyRegistry` address (web `config.js`, C++ `ChainConfig`), with the
+    localStorage / `SECUREMAILBOX_KEY_REGISTRY` overrides retained for pointing
+    a build at a local Hardhat node during testing; the backend reads all
+    addresses from env (`.env.example` updated). This closes the deployment
+    gap the earlier B3/B4 notes referred to when they described reads against
+    "a live local node": the contracts the clients read are now live on the
+    public testnet.
 
 ---
 
@@ -677,8 +694,8 @@ legacy data in tests — but no shipped call site passes empty AAD.
 | Gap | Fix | When |
 |---|---|---|
 | §8.1 key pinning | **Done — both clients.** TOFU pin store (web: IndexedDB; C++: per-account pin file), hard block + fingerprint display on change, explicit override re-pins. Residual: first-contact trust (inherent to TOFU; blockchain registry would strengthen) | Web + C++ rework chunks (landed) |
-| §8.1 / §8.11 first-contact trust | `KeyRegistry.sol` (B1). Backend register/rotate + `?onchain=1` lookup (B2). Client read primitives — from-scratch Keccak-256 + direct `eth_call` (B3a). **Pre-encrypt gate wired into both clients (B3b web, B3c C++, landed)**: independent second defence after TOFU; revoked-encrypt hard-blocks, RPC failure fails closed with typed override; verified end-to-end (revoked recipient blocked before encryption; unreachable RPC aborts). Residual: first-registration trust and the trusted-RPC assumption (§8.11(f)) | B1 → B2 → B3a → B3b/B3c (all landed) |
-| §8.11 receipt evidence | `MessageReceipt.sol` deployed + unit-tested (B1). **Backend wired (B2)**: server posts a receipt in the background after every accepted upload/share; `GET /files/{id}/download` and `.../blockchain-proof` surface status (informational, fail-open). Remaining: clients poll after upload and surface confirmation/pending in the UI | B1 (landed) → B2 (landed) → B4 (UI) |
+| §8.1 / §8.11 first-contact trust | `KeyRegistry.sol` (B1). Backend register/rotate + `?onchain=1` lookup (B2). Client read primitives — from-scratch Keccak-256 + direct `eth_call` (B3a). **Pre-encrypt gate wired into both clients (B3b web, B3c C++, landed)**: independent second defence after TOFU; revoked-encrypt hard-blocks, RPC failure fails closed with typed override; verified end-to-end (revoked recipient blocked before encryption; unreachable RPC aborts). **Live on Sepolia (B5)**: contracts deployed and the register→rotate→revoke lifecycle exercised on-chain; clients default to the live registry address (docs/deployment.md, docs/test-plan.md). Residual: first-registration trust and the trusted-RPC assumption (§8.11(f)) | B1 → B2 → B3a → B3b/B3c → B5 (all landed) |
+| §8.11 receipt evidence | `MessageReceipt.sol` deployed + unit-tested (B1). **Backend wired (B2)**: server posts a receipt in the background after every accepted upload/share; `GET /files/{id}/download` and `.../blockchain-proof` surface status (informational, fail-open). Clients poll after upload and surface confirmation/pending in the UI (B4). **Deployed live to Sepolia and a receipt posted on-chain (B5)** — see docs/deployment.md / docs/test-plan.md | B1 (landed) → B2 (landed) → B4 (UI) → B5 (live) |
 | §8.4 AAD | **Done — enforcement live at every call site in both clients** (canonical username/filename form; file ID excluded — unbindable pre-upload; no AAD-less fallback). Residual: same-pair duplication | Web + C++ rework chunks (landed) |
 | §8.3 key-at-rest | **Done — both clients.** C++: Argon2id(passphrase, dedicated salt/params) → XSalsa20-Poly1305 key-wrap vault (secretbox chosen over AES-GCM so the vault opens without AES-NI). Web: PBKDF2-HMAC-SHA256 (600k, dedicated salt) → AES-256-GCM via `wrapKey`/`unwrapKey`; session key non-extractable; legacy keys replaced via upgrade flow. Residual: PBKDF2 not memory-hard (§8.3) | C++ + web key-vault chunks (landed) |
 | §8.6 upload cap | Enforced max upload size + documented limit | Files-router chunk |

@@ -24,15 +24,18 @@ export const API = window.location.origin.startsWith('http')
  * same build can point at a local Hardhat node during development and
  * integration testing without editing source.
  *
- * KEY_REGISTRY_ADDRESS is set when the contract is deployed to Sepolia
- * (deployment sub-chunk); until then it is empty and the chain check
- * reports "unconfigured" (treated as an RPC failure: fail closed with an
- * explicit override, never silently skipped).
+ * keyRegistryAddress defaults to the live Sepolia deployment (see
+ * docs/deployment.md). The sm_chain_registry localStorage override points the
+ * same build at a local Hardhat node for development/integration testing. If
+ * the default is ever cleared to empty, the chain check reports "unconfigured"
+ * (treated as an RPC failure: fail closed with an explicit override, never
+ * silently skipped).
  */
 export const CHAIN = {
   rpcUrl:
     localStorage.getItem('sm_chain_rpc') ??
     'https://ethereum-sepolia-rpc.publicnode.com',
   keyRegistryAddress:
-    localStorage.getItem('sm_chain_registry') ?? '',
+    localStorage.getItem('sm_chain_registry') ??
+    '0x230c56Ab59535625c8eAeF18f8394b7D222a889D',
 };

@@ -36,6 +36,7 @@ import {
   keyPairStatus, unlockKeyPair, saveWrappedKeyPair, generateKeyPair,
   migrateLocalStorageKey,
 } from './crypto.js';
+import { getOnChainKey } from './chain.js';
 
 const MAX_PLAINTEXT_BYTES = 8 * 1024 * 1024;   // mirror of the server-side cap
 
@@ -171,6 +172,33 @@ function renderActiveTab() {
   });
 }
 
+// Per-file on-chain evidence badges (B4). Each is an Etherscan tx link when
+// a hash exists, or a neutral "pending" pill otherwise. Data comes from the
+// listing fields eth_tx_hash (MessageDigest anchor) and receipt_tx_hash
+// (MessageReceipt) — no per-row API call.
+const ETHERSCAN_TX = 'https://sepolia.etherscan.io/tx/';
+
+function evidenceBadges(f) {
+  const badge = (txHash, okLabel, title) => {
+    if (txHash && txHash !== 'duplicate') {
+      return `<a class="ev-badge ok" href="${ETHERSCAN_TX}${esc(txHash)}" target="_blank"
+                 rel="noopener noreferrer" title="${title}: ${esc(txHash)}">
+                <i data-lucide="circle-check"></i>${okLabel}
+                <i data-lucide="external-link" style="width:11px;height:11px"></i></a>`;
+    }
+    if (txHash === 'duplicate') {
+      return `<span class="ev-badge ok" title="${title}: hash already anchored by an earlier transaction">
+                <i data-lucide="circle-check"></i>${okLabel}</span>`;
+    }
+    return `<span class="ev-badge pending" title="${title}: not yet posted on-chain">
+              <i data-lucide="clock"></i>pending</span>`;
+  };
+  return `<div class="ev-badges">
+    ${badge(f.eth_tx_hash, 'anchored', 'MessageDigest integrity anchor')}
+    ${badge(f.receipt_tx_hash, 'receipt', 'MessageReceipt inclusion receipt')}
+  </div>`;
+}
+
 function renderSharedRow(f) {
   return `<div class="file-row ${f.is_read ? '' : 'unread'}" data-file-id="${f.id}">
     <div class="file-icon"><i data-lucide="file-lock-2"></i></div>
@@ -183,6 +211,7 @@ function renderSharedRow(f) {
         from <strong>${esc(f.owner_username ?? 'unknown')}</strong>
         · ${fmtSize(f.size_bytes)} · ${fmtDate(f.created_at)}
       </div>
+      ${evidenceBadges(f)}
     </div>
     <div class="file-actions">
       <button class="b-action-btn" data-action="download" title="Decrypt & download">
@@ -207,6 +236,7 @@ function renderOwnedRow(f) {
         to <strong>${esc(f.recipient_username ?? 'unknown')}</strong>
         · ${fmtSize(f.size_bytes)} · ${fmtDate(f.created_at)}
       </div>
+      ${evidenceBadges(f)}
     </div>
     <div class="file-actions">
       <button class="b-action-btn" data-action="revoke" title="Remove all recipients' access">
@@ -400,15 +430,25 @@ async function ensureVault() {
 }
 
 /**
- * Fetch a peer's public key and enforce the TOFU pin.
- * - first sighting → pin silently + toast
- * - match          → proceed
- * - MISMATCH       → hard-block modal with both fingerprints; proceeding
- *                    requires an explicit "Trust new key" click (re-pins).
+ * Fetch a peer's public key and enforce BOTH trust checks, in order:
+ *
+ *   1. TOFU pin (local history): first sighting pins + toast; match
+ *      proceeds; mismatch hard-blocks behind an explicit override.
+ *   2. On-chain KeyRegistry cross-check (public transparency log), read
+ *      DIRECTLY from Sepolia — see chainGate() for the outcome table.
+ *
+ * The two checks are independent defences: TOFU compares against what THIS
+ * DEVICE saw before; the registry compares against what the server
+ * publicly committed to. A compromised server must beat both.
+ *
+ * @param {string} peerUsername
+ * @param {'encrypt'|'decrypt'} mode  Encrypt = pre-encrypt security gate
+ *   (upload/share; strictest, per the blockchain brief). Decrypt =
+ *   sender-key cross-check on download.
  * @returns {Promise<string>} the verified public key (base64)
- * @throws  if the peer has no key or the user aborts on mismatch
+ * @throws  if the peer has no key or any check blocks
  */
-async function getVerifiedPeerKey(peerUsername) {
+async function getVerifiedPeerKey(peerUsername, mode = 'encrypt') {
   const res = await fetch(`${API}/users/${encodeURIComponent(peerUsername)}`);
   if (!res.ok) throw new Error(`User "${peerUsername}" not found.`);
   const peer = await res.json();
@@ -419,20 +459,117 @@ async function getVerifiedPeerKey(peerUsername) {
 
   if (pin.status === 'first-use') {
     toast(`First contact with ${peerUsername} — their key has been pinned on this device.`);
-    return peer.public_key;
+  } else if (pin.status === 'mismatch') {
+    // Mismatch — the §3(d)1 scenario. Block until an explicit decision.
+    const [oldFp, newFp] = await Promise.all([
+      keyFingerprint(pin.pinnedKeyB64), keyFingerprint(peer.public_key),
+    ]);
+    const proceed = await showKeyChangeWarning(peerUsername, oldFp, newFp, pin.pinnedSince);
+    if (!proceed) throw new Error(`Aborted: ${peerUsername}'s key does not match the pinned key.`);
+
+    await overridePin(me, peerUsername, peer.public_key);
+    toast(`New key pinned for ${peerUsername}.`);
   }
-  if (pin.status === 'match') return peer.public_key;
+  // pin.status === 'match' falls through silently.
 
-  // Mismatch — the §3(d)1 scenario. Block until an explicit decision.
-  const [oldFp, newFp] = await Promise.all([
-    keyFingerprint(pin.pinnedKeyB64), keyFingerprint(peer.public_key),
-  ]);
-  const proceed = await showKeyChangeWarning(peerUsername, oldFp, newFp, pin.pinnedSince);
-  if (!proceed) throw new Error(`Aborted: ${peerUsername}'s key does not match the pinned key.`);
-
-  await overridePin(me, peerUsername, peer.public_key);
-  toast(`New key pinned for ${peerUsername}.`);
+  await chainGate(peerUsername, peer.public_key, mode);
   return peer.public_key;
+}
+
+/**
+ * On-chain KeyRegistry gate. Outcomes (per the approved B3 decisions):
+ *
+ *   RPC failure / unconfigured → FAIL CLOSED: hard modal, proceeding needs
+ *     an explicit override (an active network attacker who can block the
+ *     RPC must not silently disable this check — same posture as TOFU).
+ *   revoked + encrypting  → HARD BLOCK, no override offered. Revocation is
+ *     an unambiguous registrar statement; there is no legitimate reason to
+ *     encrypt new content to a revoked key.
+ *   revoked + decrypting  → warn with override: the file may PREDATE the
+ *     revocation, and old mail must remain readable.
+ *   not registered        → soft notice only (accounts created before the
+ *     registry integration have no on-chain record yet).
+ *   chain key ≠ server key → the substitution-detection event: hard modal
+ *     showing both fingerprints, explicit override to proceed with the
+ *     server's key (legitimate cause: a rotation whose background chain
+ *     write hasn't landed/succeeded yet).
+ *   registered + clean match → proceed silently.
+ */
+async function chainGate(peerUsername, serverKeyB64, mode) {
+  const chain = await getOnChainKey(peerUsername);
+
+  if (chain.status === 'error') {
+    const proceed = await showChainModal({
+      title: 'On-chain key check unavailable',
+      bodyHtml:
+        `The key registry on Sepolia could not be consulted for ` +
+        `<strong>${esc(peerUsername)}</strong>:<br><code>${esc(chain.reason)}</code><br><br>` +
+        `This check detects server key-substitution. An attacker who can block ` +
+        `access to the blockchain could be causing this failure deliberately. ` +
+        `Only continue if you accept proceeding without it.`,
+      proceedLabel: 'Proceed without on-chain check',
+    });
+    if (!proceed) throw new Error(`Aborted: on-chain key check for ${peerUsername} unavailable.`);
+    toast(`Proceeding WITHOUT on-chain verification for ${peerUsername}.`);
+    return;
+  }
+
+  if (!chain.registered) {
+    toast(`${peerUsername} has no on-chain key record yet (pre-registry account) — TOFU pin is the active protection.`);
+    return;
+  }
+
+  if (chain.revoked) {
+    if (mode === 'encrypt') {
+      await showChainModal({
+        title: 'Key revoked on-chain — blocked',
+        bodyHtml:
+          `<strong>${esc(peerUsername)}</strong>'s encryption key is marked ` +
+          `<strong>REVOKED</strong> in the on-chain registry (typically: key ` +
+          `compromise or account retirement). Encrypting new files to a revoked ` +
+          `key is not allowed — there is no override for this.`,
+        proceedLabel: null,   // no override: revocation is unambiguous
+      });
+      throw new Error(`${peerUsername}'s key is revoked on-chain — upload blocked.`);
+    }
+    const proceed = await showChainModal({
+      title: 'Sender key revoked on-chain',
+      bodyHtml:
+        `<strong>${esc(peerUsername)}</strong>'s key is marked REVOKED in the ` +
+        `on-chain registry. This file may have been encrypted before the ` +
+        `revocation (old mail stays readable), but content signed by a revoked ` +
+        `key could also be forged by whoever caused the revocation.`,
+      proceedLabel: 'Decrypt anyway — file may predate revocation',
+    });
+    if (!proceed) throw new Error(`Aborted: ${peerUsername}'s key is revoked on-chain.`);
+    return;
+  }
+
+  if (chain.keyB64 !== serverKeyB64) {
+    const [chainFp, serverFp] = await Promise.all([
+      keyFingerprint(chain.keyB64), keyFingerprint(serverKeyB64),
+    ]);
+    const proceed = await showChainModal({
+      title: 'Server key disagrees with the on-chain registry',
+      bodyHtml:
+        `The key the server returned for <strong>${esc(peerUsername)}</strong> does ` +
+        `<strong>not</strong> match the key in the public on-chain registry ` +
+        `(registry version ${chain.version}).<br><br>` +
+        `<span class="tofu-fp-label">On-chain registry key</span>` +
+        `<div class="tofu-fp">${chainFp}</div>` +
+        `<span class="tofu-fp-label">Key the server returned</span>` +
+        `<div class="tofu-fp new">${serverFp}</div><br>` +
+        `This is either a very recent key rotation whose on-chain update has not ` +
+        `landed yet — or the server substituting a key. Verify with ` +
+        `${esc(peerUsername)} out-of-band before continuing.`,
+      proceedLabel: "I verified it — use the server's key",
+    });
+    if (!proceed) throw new Error(`Aborted: server key for ${peerUsername} contradicts the on-chain registry.`);
+    toast(`Proceeding with the server's key for ${peerUsername} despite the registry mismatch.`);
+    return;
+  }
+
+  // Registered, not revoked, and the server's key matches the public log.
 }
 
 /** Modal returning a Promise<boolean>; Cancel is the default/safe path. */
@@ -452,6 +589,65 @@ function showKeyChangeWarning(peer, oldFp, newFp, pinnedSince) {
     document.getElementById('tofu-trust').onclick  = () => done(true);
     modal.onclick = e => { if (e.target === modal) done(false); };
   });
+}
+
+/**
+ * Generic on-chain-check modal (Promise<boolean>). Cancel is always the
+ * default/safe path; passing proceedLabel: null hides the proceed button
+ * entirely (hard block with no override — used for revoked-key encrypt).
+ */
+function showChainModal({ title, bodyHtml, proceedLabel }) {
+  return new Promise(resolve => {
+    const modal = document.getElementById('chain-modal');
+    document.getElementById('chain-modal-title').textContent = title;
+    document.getElementById('chain-modal-body').innerHTML    = bodyHtml;
+
+    const proceedBtn = document.getElementById('chain-modal-proceed');
+    proceedBtn.style.display = proceedLabel ? '' : 'none';
+    if (proceedLabel) proceedBtn.textContent = proceedLabel;
+
+    modal.style.display = 'flex';
+    lucide.createIcons();
+
+    const done = (answer) => { modal.style.display = 'none'; resolve(answer); };
+    document.getElementById('chain-modal-cancel').onclick = () => done(false);
+    proceedBtn.onclick = () => done(true);
+    modal.onclick = e => { if (e.target === modal) done(false); };
+  });
+}
+
+// ── Receipt polling (informational, fail-open) ─────────────────────────────────
+
+/**
+ * After a successful upload, watch for the server's on-chain MessageReceipt.
+ * Purely informational: the server posts the receipt in a background thread
+ * and Sepolia blocks land every ~12 s, so this polls the blockchain-proof
+ * endpoint a few times with backoff and reports what it finds. All failure
+ * modes fade out quietly ("not yet confirmed") — this is evidence display,
+ * NOT a security gate, per the approved fail-open decision. Contrast with
+ * chainGate() above, which fails closed.
+ */
+async function pollReceiptStatus(fileId, filename) {
+  const delays = [4000, 6000, 8000, 12000, 15000];   // ~45 s total
+  for (const delay of delays) {
+    await new Promise(r => setTimeout(r, delay));
+    try {
+      const res = await authFetch(`${API}/files/${fileId}/blockchain-proof`);
+      if (!res.ok) continue;
+      const proof = await res.json();
+      if (proof.receipt?.exists) {
+        toast(`On-chain receipt for "${filename}" confirmed (block ${proof.receipt.block_number}).`);
+        return;
+      }
+      if (proof.receipt_tx_hash) {
+        toast(`Receipt for "${filename}" posted (tx ${proof.receipt_tx_hash.slice(0, 10)}…) — awaiting confirmation.`);
+        // keep polling until exists or attempts run out
+      }
+    } catch {
+      // RPC/network hiccup — informational path, keep trying then give up
+    }
+  }
+  toast(`No on-chain receipt for "${filename}" yet — check the verify page later.`);
 }
 
 // ── Upload ─────────────────────────────────────────────────────────────────────
@@ -532,6 +728,11 @@ async function handleUpload(e) {
 
     closeUploadModal();
     toast(`Encrypted and uploaded "${chosenFile.name}" for ${recipient}.`);
+
+    // Watch for the server's on-chain receipt in the background —
+    // fire-and-forget, informational only (fail-open by design).
+    if (body.id) pollReceiptStatus(body.id, chosenFile.name);
+
     await refreshLists();
     switchTab('owned');
 
@@ -561,8 +762,10 @@ async function fetchAndDecrypt(fileId) {
   const me      = getUsername();
   const privKey = await requireSessionKey();
 
-  // TOFU-gated owner (sender) key — Mode_Auth authenticates against it.
-  const ownerKey = await getVerifiedPeerKey(dl.owner_username);
+  // TOFU + chain-gated owner (sender) key — Mode_Auth authenticates against
+  // it. 'decrypt' mode: a revoked sender key warns (old mail may predate the
+  // revocation) instead of hard-blocking like the encrypt gate.
+  const ownerKey = await getVerifiedPeerKey(dl.owner_username, 'decrypt');
 
   // storedBlob = base64(nonce_12B ‖ ciphertext_with_tag); strip the nonce
   // prefix — the nonce is re-derived from the key schedule.

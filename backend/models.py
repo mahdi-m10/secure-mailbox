@@ -24,6 +24,18 @@ new schema.  For an existing database that must be preserved:
     ALTER TABLE files ADD COLUMN filename VARCHAR(255);
     ALTER TABLE files ADD COLUMN content_type VARCHAR(127);
     ALTER TABLE files ADD COLUMN size_bytes INTEGER;
+
+Migration note (blockchain B2 — KeyRegistry / MessageReceipt integration)
+--------------------------------------------------------------------------
+    ALTER TABLE users ADD COLUMN eth_key_tx VARCHAR(66);
+    ALTER TABLE files ADD COLUMN receipt_tx_hash VARCHAR(66);
+
+``users.eth_key_tx`` stores only the MOST RECENT KeyRegistry
+register/rotate transaction hash for that user — a convenience pointer for
+the UI, not the source of truth (the contract's KeyRegistered event log is
+the append-only history; see backend/blockchain/registry.py).
+``files.receipt_tx_hash`` stores the MessageReceipt posting transaction for
+that file, if any.
 """
 
 from datetime import datetime, timezone
@@ -63,6 +75,10 @@ class User(Base):
 
     # Public key used for end-to-end encryption (PEM / base64 encoded)
     public_key: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    # Most recent KeyRegistry register/rotate transaction hash (0x-prefixed).
+    # Convenience pointer only — the contract's event log is authoritative.
+    eth_key_tx: Mapped[str | None] = mapped_column(String(66), nullable=True)
 
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     created_at: Mapped[datetime] = mapped_column(
@@ -152,6 +168,10 @@ class FileObject(Base):
 
     # SHA-256 / HMAC integrity tag for tamper detection
     integrity_hash: Mapped[str | None] = mapped_column(String(256), nullable=True)
+
+    # MessageReceipt posting transaction hash (0x-prefixed), if the server
+    # has posted an on-chain receipt for this file's ciphertext.
+    receipt_tx_hash: Mapped[str | None] = mapped_column(String(66), nullable=True)
 
     is_deleted: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     # Marks files created by the share/forward endpoint (re-encrypted for a

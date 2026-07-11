@@ -131,6 +131,11 @@ arbitrary responses.
    who blindly clicks through the override warning re-opens the hole.
    Out-of-band fingerprint comparison (both clients display fingerprints) or
    the proposed blockchain key registry would close first-contact trust.
+   **Status: the on-chain `KeyRegistry` contract now exists** (registration,
+   rotation, revocation, public `getKey` lookup — §9), but as of this chunk
+   no client consults it before encrypting; TOFU pinning remains the only
+   live mitigation until the client-integration sub-chunk lands. See §8.1
+   for the registry's own trust-model residual once it is wired in.
 2. **Availability & completeness.** The server can drop, withhold, reorder, or
    duplicate files, or lie in listings. Asynchronous store-and-forward cannot
    prevent this; it can at best be made evident (out of scope here; the
@@ -193,8 +198,10 @@ Sender (before upload)                    │
   │       lookup — trust model in §3(d)1) │
 ```
 
-The key directory is the server. **Trust model: TOFU-with-pinning is the
-design; the pin is not yet implemented** (§3(d)1, §9).
+The key directory is the server. **Trust model: TOFU-with-pinning**, pin
+implemented and enforced in both clients (§3(d)1, §8.1). The on-chain
+KeyRegistry (§8.11) is an additional, complementary check on this same
+lookup — not yet consulted by any client as of this chunk (§9).
 
 ### 4.3 Upload (encrypt) — HPKE Mode_Auth encapsulation
 
@@ -519,10 +526,19 @@ legacy data in tests — but no shipped call site passes empty AAD.
    explicit override re-pins), so key substitution against established pairs
    is detected. The residual gap is inherent to TOFU: the very first fetch of
    a peer's key is trusted unverified, and a user can click through the
-   mismatch warning. Mitigations: out-of-band fingerprint comparison (both
-   clients display SHA-256 fingerprints); the proposed blockchain
-   key-registry component, if confirmed, would strengthen first-contact
-   trust beyond TOFU.
+   mismatch warning. **The on-chain `KeyRegistry` contract (blockchain
+   scope, contracts + unit tests landed this chunk) is the mitigation this
+   section anticipated**: a server-custodial registrar posts each user's key
+   on Sepolia at registration, so a substitution is either publicly visible
+   as a contradicting on-chain event or requires the server to serve a key
+   that disagrees with the chain — detectable by any client that checks.
+   Precise scope of the claim, stated so it is not overclaimed: this is a
+   **public transparency log**, not a trustless PKI — a registrar that lies
+   from a user's very first registration is still undetectable, and until
+   the client-integration sub-chunk lands, no client actually performs the
+   on-chain check, so TOFU remains the only *live* mitigation today.
+   Out-of-band fingerprint comparison remains a complementary defence
+   either way.
 2. **No forward secrecy / no post-compromise security** (§3(d)5) — accepted
    for scope; would require a ratchet or per-session ephemeral–ephemeral
    exchange, which asynchronous offline delivery complicates.
@@ -568,6 +584,108 @@ legacy data in tests — but no shipped call site passes empty AAD.
 10. **Denial of service:** rate limiting exists on login only; upload
     endpoints need size caps + rate limits (networks/pentest work item, noted
     here for completeness).
+11. **`KeyRegistry`/`MessageReceipt` trust boundaries.**
+    (a) Registrar-custodial model: the registry's integrity depends on the
+    server's registrar wallet key; a compromised server can post arbitrary
+    (mis)registrations as easily as it can lie off-chain — the value is
+    *making a substitution publicly visible and non-repudiable*, not
+    preventing the server from acting maliciously. (b) `MessageReceipt` proves
+    the server accepted a specific ciphertext at a specific time; it does
+    NOT prove the server will keep serving it — a server can still simply
+    withhold a file it never posted a receipt for, which the uploading
+    client detects at upload time by the *absence* of a receipt, not
+    after the fact. (c) **Backend integration landed** (B2): the server
+    registers/rotates a user's key on-chain in the background whenever a
+    public key is uploaded (at registration or via `POST /users/keys`),
+    and posts a `MessageReceipt` in the background after every accepted
+    upload/share. `GET /users/{username}?onchain=1` exposes a live registry
+    read (opt-in — see the rationale below); `GET /files/{id}/download` and
+    `.../blockchain-proof` expose receipt status. **No client yet performs
+    the pre-encrypt registry check or refuses on a revoked key** — that is
+    B3 (client integration); see the remediation map.
+    (d) **Shared-wallet nonce race, found and fixed during B2 integration
+    testing**: `MessageDigest`, `KeyRegistry`, and `MessageReceipt` are all
+    signed by the same registrar/deployer wallet, and a single upload fires
+    a digest-anchor thread and a receipt thread concurrently — both read
+    `get_transaction_count(..., "pending")` before broadcasting, which is
+    not atomic, so the second send was rejected ("nonce too low") when
+    tested against a live local node. Fixed with a process-wide lock held
+    only across the nonce-read→sign→broadcast step (not the slower
+    confirmation wait), shared by all three contracts' send paths.
+    (e) `?onchain=1` is opt-in on `GET /users/{username}` and not offered on
+    the bulk `GET /users` listing at all — a per-user live RPC read for a
+    500-row page would mean up to 500 sequential RPC calls per request.
+    On-chain lookups here fail open (`onchain: null` + `onchain_error`);
+    this is informational display, not the security gate — the client-side
+    pre-encrypt check that must fail closed is still B3.
+    (f) **Client-side registry reads (B3a, landed)** deliberately bypass the
+    mailbox server entirely: each client computes `keccak256(username)`
+    itself (Keccak-256 implemented from scratch in both clients — no
+    browser or libsodium primitive provides the Ethereum variant, whose
+    0x01 padding predates and differs from standardized SHA-3's 0x06;
+    both implementations are tested against fixed vectors and against
+    values observed live on-chain), builds the `getKey(bytes32)` calldata
+    locally (hardcoded 4-byte selector, self-checked in tests against the
+    local Keccak), and issues `eth_call` directly against a **public,
+    keyless Sepolia RPC endpoint** (publicnode.com). Keyless is a
+    deliberate trade: an API-keyed provider URL embedded in page source or
+    a distributed binary leaks the key and shares one quota across all
+    clients. The cost, stated honestly: public endpoints are rate-limited
+    and offer no SLA — a busy or throttled endpoint degrades into the
+    RPC-failure path, which the pre-encrypt gate treats as FAIL CLOSED
+    (explicit typed override required, mirroring the TOFU-mismatch
+    pattern), so degraded RPC service degrades availability, never
+    security. Note also the residual: the client trusts the chosen RPC
+    node to answer `eth_call` honestly — a malicious RPC endpoint could
+    lie about registry state (light-client verification is far out of
+    scope); using a well-known public provider distinct from the mailbox
+    operator keeps the two trust domains separate, which is the property
+    that matters for this threat model.
+    (g) **Client gates wired (B3b web, B3c C++, landed).** Both clients now
+    run the registry check as a second, independent defence after the TOFU
+    pin, at every encrypt and decrypt call site. Identical outcome table in
+    both: RPC failure/unconfigured → fail closed (explicit typed override);
+    revoked key on **encrypt** → hard block with NO override; revoked on
+    **decrypt** → override allowed (the file may predate the revocation and
+    old mail must stay readable); not-registered → soft notice (pre-registry
+    accounts have no record); server key ≠ on-chain key → override showing
+    both fingerprints (recent rotation lag, or substitution). Verified
+    end-to-end against a live local node driving the real UI / CLI: a
+    revoked recipient is blocked before any encryption occurs, and an
+    unreachable RPC aborts unless the user types the override. Receipt
+    confirmation after upload is the deliberate opposite posture —
+    fail-open, informational polling that never blocks (docs note: it is
+    evidence display, not a control).
+    (h) **Key Verification Page + inbox evidence (B4, landed).** A dedicated
+    page (`verify-key.html`) looks a user up and shows a verdict across three
+    independent sources: the on-chain registry read directly from Sepolia,
+    the server's current key, and this browser's TOFU pin (read-only —
+    viewing never creates a pin). It surfaces the identity hash
+    (`keccak256(username)`, since accounts hold no Ethereum address under the
+    registrar model), the registry contract and registration-tx Etherscan
+    links, and the tx's block number (a second direct
+    `eth_getTransactionReceipt` call). The mailbox listings gained
+    `eth_tx_hash` / `receipt_tx_hash` (additive) so each file row renders
+    "anchored" / "receipt" / "pending" evidence badges linking to Etherscan
+    — no per-row API call. All read-only display; nothing here is a security
+    control (the enforcing gate is B3b/B3c).
+    (i) **Live Sepolia deployment (B5, landed).** `KeyRegistry` and
+    `MessageReceipt` are deployed to Sepolia and the full lifecycle exercised
+    on-chain — register → rotate → revoke on one identity, plus a posted
+    receipt — each a real signed transaction (addresses, tx hashes, block
+    numbers and Etherscan links in docs/deployment.md; verification procedure
+    and results in docs/test-plan.md). The observed lifecycle matches the
+    contract invariants: registration lands at version 1, rotation bumps to
+    version 2, revocation preserves the record with `revoked = true` (so
+    clients still distinguish "revoked" from "never registered"), and the
+    receipt reads back `exists = true`. Both clients now default to the live
+    `KeyRegistry` address (web `config.js`, C++ `ChainConfig`), with the
+    localStorage / `SECUREMAILBOX_KEY_REGISTRY` overrides retained for pointing
+    a build at a local Hardhat node during testing; the backend reads all
+    addresses from env (`.env.example` updated). This closes the deployment
+    gap the earlier B3/B4 notes referred to when they described reads against
+    "a live local node": the contracts the clients read are now live on the
+    public testnet.
 
 ---
 
@@ -576,6 +694,8 @@ legacy data in tests — but no shipped call site passes empty AAD.
 | Gap | Fix | When |
 |---|---|---|
 | §8.1 key pinning | **Done — both clients.** TOFU pin store (web: IndexedDB; C++: per-account pin file), hard block + fingerprint display on change, explicit override re-pins. Residual: first-contact trust (inherent to TOFU; blockchain registry would strengthen) | Web + C++ rework chunks (landed) |
+| §8.1 / §8.11 first-contact trust | `KeyRegistry.sol` (B1). Backend register/rotate + `?onchain=1` lookup (B2). Client read primitives — from-scratch Keccak-256 + direct `eth_call` (B3a). **Pre-encrypt gate wired into both clients (B3b web, B3c C++, landed)**: independent second defence after TOFU; revoked-encrypt hard-blocks, RPC failure fails closed with typed override; verified end-to-end (revoked recipient blocked before encryption; unreachable RPC aborts). **Live on Sepolia (B5)**: contracts deployed and the register→rotate→revoke lifecycle exercised on-chain; clients default to the live registry address (docs/deployment.md, docs/test-plan.md). Residual: first-registration trust and the trusted-RPC assumption (§8.11(f)) | B1 → B2 → B3a → B3b/B3c → B5 (all landed) |
+| §8.11 receipt evidence | `MessageReceipt.sol` deployed + unit-tested (B1). **Backend wired (B2)**: server posts a receipt in the background after every accepted upload/share; `GET /files/{id}/download` and `.../blockchain-proof` surface status (informational, fail-open). Clients poll after upload and surface confirmation/pending in the UI (B4). **Deployed live to Sepolia and a receipt posted on-chain (B5)** — see docs/deployment.md / docs/test-plan.md | B1 (landed) → B2 (landed) → B4 (UI) → B5 (live) |
 | §8.4 AAD | **Done — enforcement live at every call site in both clients** (canonical username/filename form; file ID excluded — unbindable pre-upload; no AAD-less fallback). Residual: same-pair duplication | Web + C++ rework chunks (landed) |
 | §8.3 key-at-rest | **Done — both clients.** C++: Argon2id(passphrase, dedicated salt/params) → XSalsa20-Poly1305 key-wrap vault (secretbox chosen over AES-GCM so the vault opens without AES-NI). Web: PBKDF2-HMAC-SHA256 (600k, dedicated salt) → AES-256-GCM via `wrapKey`/`unwrapKey`; session key non-extractable; legacy keys replaced via upgrade flow. Residual: PBKDF2 not memory-hard (§8.3) | C++ + web key-vault chunks (landed) |
 | §8.6 upload cap | Enforced max upload size + documented limit | Files-router chunk |

@@ -156,9 +156,15 @@ See [cpp-client/README.md](cpp-client/README.md) for full usage notes.
 ```bash
 cd blockchain && npm install && npx hardhat compile
 # Deploy (requires SEPOLIA_RPC_URL and DEPLOYER_PRIVATE_KEY in .env):
-npx hardhat run scripts/deploy.js --network sepolia
-# Copy the printed address into .env as CONTRACT_ADDRESS
+npx hardhat run scripts/deploy.js --network sepolia            # MessageDigest
+npx hardhat run scripts/deploy-registry.js --network sepolia   # KeyRegistry + MessageReceipt
+# Copy the printed addresses into .env (CONTRACT_ADDRESS,
+# KEY_REGISTRY_ADDRESS, MESSAGE_RECEIPT_ADDRESS).
 ```
+
+The contracts are already deployed live on Sepolia; addresses, tx hashes, and
+Etherscan links are recorded in [docs/deployment.md](docs/deployment.md), and
+the on-chain lifecycle verification in [docs/test-plan.md](docs/test-plan.md).
 
 ---
 
@@ -175,8 +181,10 @@ Copy `.env.example` to `.env`. **Never commit `.env`.**
 | `APP_ENV` | `development` or `production` |
 | `DEBUG` | `true` / `false` |
 | `SEPOLIA_RPC_URL` | Sepolia HTTPS RPC endpoint |
-| `DEPLOYER_PRIVATE_KEY` | Deployer wallet private key (no `0x` prefix) |
+| `DEPLOYER_PRIVATE_KEY` | Deployer wallet private key (no `0x` prefix); the registrar/server wallet |
 | `CONTRACT_ADDRESS` | Deployed `MessageDigest` contract address |
+| `KEY_REGISTRY_ADDRESS` | Deployed `KeyRegistry` contract address (see docs/deployment.md) |
+| `MESSAGE_RECEIPT_ADDRESS` | Deployed `MessageReceipt` contract address (see docs/deployment.md) |
 
 ---
 

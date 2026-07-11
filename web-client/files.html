@@ -41,6 +41,18 @@
       overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
     }
     .file-sub  { font-size: 12px; color: var(--slate-500, #64748b); margin-top: 2px; }
+
+    /* ── On-chain evidence badges (B4) ──────────────────────────── */
+    .ev-badges { display: flex; gap: 6px; margin-top: 6px; flex-wrap: wrap; }
+    .ev-badge {
+      display: inline-flex; align-items: center; gap: 4px;
+      font-size: 10.5px; font-weight: 700; text-transform: uppercase; letter-spacing: .03em;
+      border-radius: 6px; padding: 2px 7px; text-decoration: none;
+    }
+    .ev-badge svg { width: 12px; height: 12px; }
+    .ev-badge.ok      { background: rgba(16,185,129,.12); color: #047857; }
+    .ev-badge.ok:hover{ background: rgba(16,185,129,.20); }
+    .ev-badge.pending { background: var(--slate-100, #f1f5f9); color: var(--slate-500, #64748b); }
     .file-tag {
       font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: .04em;
       background: var(--slate-100, #f1f5f9); color: var(--slate-500, #64748b);
@@ -170,9 +182,13 @@
         <button class="file-tab active" data-tab="shared">Shared with me</button>
         <button class="file-tab" data-tab="owned">My uploads</button>
       </div>
-      <a href="verify.html" class="btn-verify" style="margin-left:auto">
+      <a href="verify-key.html" class="btn-verify" style="margin-left:auto">
+        <i data-lucide="shield-check"></i>
+        Verify Key
+      </a>
+      <a href="verify.html" class="btn-verify" style="margin-left:8px">
         <i data-lucide="shield"></i>
-        Verify Integrity
+        Verify File
       </a>
     </header>
 
@@ -255,6 +271,21 @@
   </div>
 </div>
 
+<!-- ── On-chain key-registry check modal (chainGate outcomes) ── -->
+<div id="chain-modal" class="modal-overlay" style="display:none" role="alertdialog" aria-modal="true" aria-labelledby="chain-modal-title">
+  <div class="modal-card tofu-card">
+    <div class="tofu-warning-head">
+      <i data-lucide="link" style="width:22px;height:22px;flex-shrink:0"></i>
+      <span id="chain-modal-title"></span>
+    </div>
+    <div class="tofu-body" id="chain-modal-body"></div>
+    <div class="modal-actions">
+      <button type="button" id="chain-modal-cancel" class="btn btn-primary">Cancel (recommended)</button>
+      <button type="button" id="chain-modal-proceed" class="btn btn-danger"></button>
+    </div>
+  </div>
+</div>
+
 <!-- ── Key-vault modal (unlock / create / legacy upgrade) ── -->
 <div id="vault-modal" class="modal-overlay" style="display:none" role="dialog" aria-modal="true" aria-labelledby="vault-title-text">
   <div class="modal-card">
@@ -321,7 +352,7 @@
 
 <div id="toast"></div>
 
-<script src="https://unpkg.com/lucide@latest/dist/umd/lucide.min.js"></script>
+<script src="./js/lucide-icons.js"></script>
 <script type="module" src="js/files.js"></script>
 </body>
 </html>

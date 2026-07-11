@@ -20,6 +20,8 @@ find_package(nlohmann_json REQUIRED)
 add_executable(secure_mailbox
     src/main.cpp
     src/Crypto.cpp
+    src/Keccak.cpp
+    src/Chain.cpp
     src/KeyVault.cpp
     src/PinStore.cpp
     src/User.cpp

@@ -67,6 +67,19 @@ class UserResponse(BaseModel):
     created_at: datetime
 
 
+class OnChainKeyInfo(BaseModel):
+    """KeyRegistry.getKey() result for one identity, plus the DB's pointer
+    to the most recent registration/rotation transaction (informational —
+    the contract's event log remains authoritative)."""
+
+    registered: bool
+    version: int
+    key_b64: str | None
+    updated_at: int | None
+    revoked: bool
+    tx_hash: str | None = None
+
+
 class UserPublicKeyResponse(BaseModel):
     """Minimal user record for public key discovery.
 
@@ -82,6 +95,14 @@ class UserPublicKeyResponse(BaseModel):
     id: int
     username: str
     public_key: str | None
+
+    # Populated only when the caller passes ?onchain=1 — a live KeyRegistry
+    # read, not a DB lookup, so a client can catch a live discrepancy
+    # between what the server says and what the chain says. None when not
+    # requested; also None (with onchain_error set) if the RPC call fails —
+    # this endpoint never fails the whole response over a chain read.
+    onchain: OnChainKeyInfo | None = None
+    onchain_error: str | None = None
 
 
 class PublicKeyUpload(BaseModel):
@@ -409,6 +430,22 @@ class FileListItem(BaseModel):
     is_forwarded: bool | None = None        # True for files created by the share endpoint
     created_at: datetime
 
+    # On-chain evidence pointers (nullable — anchoring/receipting run in
+    # background threads and may not have landed yet, or may be disabled):
+    #   eth_tx_hash     — MessageDigest anchor tx ("duplicate" sentinel means
+    #                     the hash was already anchored by an earlier tx)
+    #   receipt_tx_hash — MessageReceipt posting tx
+    # Used by the mailbox UI to render per-file Etherscan evidence badges.
+    eth_tx_hash: str | None = None
+    receipt_tx_hash: str | None = None
+
+
+class ReceiptInfo(BaseModel):
+    """MessageReceipt status for one file, as recorded in the local DB."""
+
+    posted: bool
+    tx_hash: str | None = None
+
 
 class FileDownloadResponse(BaseModel):
     """Full encrypted payload returned by GET /files/{id}/download.
@@ -452,3 +489,9 @@ class FileDownloadResponse(BaseModel):
     integrity_hash: str | None
     is_read: bool
     created_at: datetime
+
+    # MessageReceipt status — read from the DB column (files.receipt_tx_hash),
+    # not a live chain call: this is informational evidence, not a security
+    # gate, so a fail-open "pending" read here is fine (see
+    # docs/crypto-design.md §8.11). None if no receipt has been posted yet.
+    receipt: ReceiptInfo | None = None

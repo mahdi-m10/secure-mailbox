@@ -358,36 +358,32 @@ class ShareRequest(BaseModel):
         description="Username of the user to share the file with.",
     )
 
-    # Re-encryption payload (preferred path).
-    # The sharer decrypts the original file on their device, then re-encrypts
-    # the plaintext specifically for the new recipient.  When all three fields
-    # are present the backend creates a brand-new file row so the new
-    # recipient can actually decrypt it.
-    new_ciphertext: str | None = Field(
-        default=None,
+    # Re-encryption payload — the only share path. The sharer decrypts the
+    # original file on their device, then re-encrypts the plaintext
+    # specifically for the new recipient; the backend creates a brand-new
+    # file row so the new recipient can actually decrypt it. (A legacy path
+    # that shared the original ciphertext without re-encryption was removed:
+    # it produced rows the new recipient could never decrypt, and no client
+    # ever called it.)
+    new_ciphertext: str = Field(
+        ...,
         description="Re-encrypted ciphertext (base64, without nonce prepended).",
     )
-    new_nonce: str | None = Field(
-        default=None,
+    new_nonce: str = Field(
+        ...,
         description="Nonce for the re-encrypted ciphertext (base64, 12 bytes).",
     )
-    new_encrypted_key: str | None = Field(
-        default=None,
+    new_encrypted_key: str = Field(
+        ...,
         description="HPKE encapsulated key for the new recipient (base64, 32 bytes).",
-    )
-
-    # Legacy field kept for backward compatibility.
-    encrypted_key: str | None = Field(
-        default=None,
-        description="Deprecated: wrapped key for shared-access forwarding.",
     )
 
     @field_validator("new_ciphertext")
     @classmethod
-    def _new_ciphertext_within_cap(cls, v: str | None) -> str | None:
+    def _new_ciphertext_within_cap(cls, v: str) -> str:
         # Same upload cap as FileUpload.ciphertext — a share re-encrypts the
         # whole file, so it must obey the same size limit.
-        if v is not None and len(v) > MAX_CIPHERTEXT_B64_LEN:
+        if len(v) > MAX_CIPHERTEXT_B64_LEN:
             raise ValueError(
                 f"new_ciphertext exceeds the upload limit "
                 f"({MAX_CIPHERTEXT_B64_LEN} base64 chars ≈ 8 MiB plaintext)."

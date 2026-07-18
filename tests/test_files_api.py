@@ -143,14 +143,10 @@ def test_owner_view_shows_true_recipient_in_aad(client, two_users, uploaded_file
 
 
 def test_owner_view_with_ambiguous_recipients_leaves_slot_blank(
-    client, three_users, uploaded_file
+    client, three_users, uploaded_file, db_session
 ):
-    """Legacy multi-recipient share: no single recipient, so don't guess."""
-    client.post(
-        f"/files/{uploaded_file}/share",
-        json={"recipient_username": "carol"},  # no new_* fields -> legacy path
-        headers=three_users["bob"],
-    )
+    """Multiple access rows (legacy-era database): no single recipient, don't guess."""
+    _seed_access_row(db_session, uploaded_file, "carol")
     res = client.get(f"/files/{uploaded_file}/download", headers=three_users["alice"])
     assert res.status_code == 200
     assert res.json()["associated_data"] == (
@@ -188,6 +184,31 @@ def test_double_delete_returns_404(client, two_users, uploaded_file):
 # ---------------------------------------------------------------------------
 # Share
 # ---------------------------------------------------------------------------
+
+def _seed_access_row(db_session, file_id, username):
+    """Insert a FileAccess row directly, bypassing the API.
+
+    Simulates a database written before the legacy no-re-encryption share
+    path was removed — the only era in which one file could have multiple
+    access rows. The API can no longer create this state.
+    """
+    import base64
+    import os
+
+    from backend import models
+
+    user = (
+        db_session.query(models.User)
+        .filter(models.User.username == username)
+        .one()
+    )
+    db_session.add(models.FileAccess(
+        file_id=file_id,
+        recipient_id=user.id,
+        encrypted_key=base64.b64encode(os.urandom(32)).decode(),
+    ))
+    db_session.commit()
+
 
 def _reencrypt_share_body(recipient):
     import base64
@@ -243,17 +264,16 @@ def test_stranger_cannot_share_returns_404(client, three_users, uploaded_file):
     assert res.status_code == 404
 
 
-def test_legacy_share_grants_access_to_original_ciphertext(
+def test_share_without_reencryption_fields_returns_422(
     client, three_users, uploaded_file
 ):
-    # No new_* fields → legacy path: access row on the ORIGINAL file.
+    # The legacy no-re-encryption path was removed: all three new_* fields
+    # are schema-required, so a body without them is rejected outright
+    # instead of silently creating a row the recipient could never decrypt.
     res = client.post(f"/files/{uploaded_file}/share",
                       json={"recipient_username": "carol"},
                       headers=three_users["bob"])
-    assert res.status_code == 200
-
-    shared = client.get("/files/shared", headers=three_users["carol"]).json()
-    assert [f["id"] for f in shared] == [uploaded_file]
+    assert res.status_code == 422
 
 
 # ---------------------------------------------------------------------------
@@ -271,11 +291,14 @@ def test_targeted_revoke_removes_access(client, two_users, uploaded_file):
     assert client.get("/files/shared", headers=two_users["bob"]).json() == []
 
 
-def test_full_revoke_removes_all_recipients(client, three_users, uploaded_file):
-    # give carol access too (legacy share), then revoke everyone
-    client.post(f"/files/{uploaded_file}/share",
-                json={"recipient_username": "carol"},
-                headers=three_users["alice"])
+def test_full_revoke_removes_all_recipients(
+    client, three_users, uploaded_file, db_session
+):
+    # Give carol a second access row directly in the DB — the API can no
+    # longer create multi-recipient rows since the legacy share path was
+    # removed, but rows written by it may exist in older databases and the
+    # full-revoke sweep must still clear them all.
+    _seed_access_row(db_session, uploaded_file, "carol")
 
     res = client.post(f"/files/{uploaded_file}/revoke", json={},
                       headers=three_users["alice"])

@@ -774,14 +774,13 @@ def share_file(
     1. Decrypt the file on their own device.
     2. Re-encrypt it for the new recipient
        (fresh HPKE encapsulation against the new recipient's public key).
-    3. Supply new_ciphertext / new_nonce / new_encrypted_key in this request.
+    3. Supply new_ciphertext / new_nonce / new_encrypted_key in this request
+       (all three required — enforced by the ShareRequest schema).
 
-    When all three re-encryption fields are present the backend creates a
-    brand-new file row so the new recipient can actually decrypt it.
-
-    The legacy path (no re-encryption fields) only adds an access row that
-    shares the original ciphertext — the new recipient can download but
-    cannot decrypt it; kept for backward compatibility.
+    The backend creates a brand-new file row so the new recipient can
+    actually decrypt it. (A legacy path that only added an access row
+    sharing the original ciphertext was removed: the new recipient could
+    download but never decrypt such a row, and no client ever called it.)
     """
     # Load without the is_deleted gate: an owner's soft-delete only hides the
     # file from the owner's own view; recipients who still have a
@@ -818,57 +817,45 @@ def share_file(
             detail="That user already has access to this file.",
         )
 
-    if body.new_ciphertext and body.new_nonce and body.new_encrypted_key:
-        # ── Re-encrypted share (preferred) ────────────────────────────
-        # The sharer decrypted the original on their device and re-encrypted
-        # it for the new recipient.  Create a fresh file row so the new
-        # recipient can actually decrypt the content with their own key pair.
-        stored_blob = _pack(body.new_nonce, body.new_ciphertext)
-        integrity   = bytes(Web3.keccak(text=stored_blob)).hex()  # 64-char hex, no 0x
+    # The sharer decrypted the original on their device and re-encrypted
+    # it for the new recipient.  Create a fresh file row so the new
+    # recipient can actually decrypt the content with their own key pair.
+    stored_blob = _pack(body.new_nonce, body.new_ciphertext)
+    integrity   = bytes(Web3.keccak(text=stored_blob)).hex()  # 64-char hex, no 0x
 
-        shared_file = models.FileObject(
-            owner_id=current_user.id,
-            ciphertext=stored_blob,
-            subject=file_obj.subject,
-            filename=file_obj.filename,
-            content_type=file_obj.content_type,
-            size_bytes=file_obj.size_bytes,
-            integrity_hash=integrity,
-            is_forwarded=True,
-        )
-        db.add(shared_file)
-        db.flush()   # allocate shared_file.id
+    shared_file = models.FileObject(
+        owner_id=current_user.id,
+        ciphertext=stored_blob,
+        subject=file_obj.subject,
+        filename=file_obj.filename,
+        content_type=file_obj.content_type,
+        size_bytes=file_obj.size_bytes,
+        integrity_hash=integrity,
+        is_forwarded=True,
+    )
+    db.add(shared_file)
+    db.flush()   # allocate shared_file.id
 
-        db.add(models.FileAccess(
-            file_id=shared_file.id,
-            recipient_id=new_recipient.id,
-            encrypted_key=body.new_encrypted_key,
-        ))
+    db.add(models.FileAccess(
+        file_id=shared_file.id,
+        recipient_id=new_recipient.id,
+        encrypted_key=body.new_encrypted_key,
+    ))
 
-        _append_blockchain_record(shared_file, db)
-        db.commit()
+    _append_blockchain_record(shared_file, db)
+    db.commit()
 
-        threading.Thread(
-            target=_submit_to_chain,
-            args=(shared_file.id, shared_file.integrity_hash),
-            daemon=True,
-        ).start()
-        threading.Thread(
-            target=_submit_receipt,
-            args=(shared_file.id, shared_file.integrity_hash,
-                  current_user.username, new_recipient.username),
-            daemon=True,
-        ).start()
-    else:
-        # ── Legacy path: share existing file_access row ───────────────
-        # The new recipient receives the original ciphertext but cannot
-        # decrypt it (it was encrypted for the original recipient's key).
-        db.add(models.FileAccess(
-            file_id=file_obj.id,
-            recipient_id=new_recipient.id,
-            encrypted_key=body.encrypted_key,
-        ))
-        db.commit()
+    threading.Thread(
+        target=_submit_to_chain,
+        args=(shared_file.id, shared_file.integrity_hash),
+        daemon=True,
+    ).start()
+    threading.Thread(
+        target=_submit_receipt,
+        args=(shared_file.id, shared_file.integrity_hash,
+              current_user.username, new_recipient.username),
+        daemon=True,
+    ).start()
 
     return {"detail": f"File shared with {new_recipient.username}."}
 
@@ -1031,9 +1018,10 @@ def download_file(
     # value (e.g. sender=bob:recipient=bob for a file bob sent to alice —
     # found via manual testing on verify.html). Resolve the real
     # recipient(s) from FileAccess instead: with exactly one recipient
-    # (the normal case) show their username; with zero or more than one
-    # (an orphaned row, or the legacy multi-recipient share path) there is
-    # no single correct answer, so leave the slot blank rather than guess.
+    # (the normal case) show their username; with zero (all access revoked)
+    # or more than one (only possible in a database written before the
+    # legacy no-re-encryption share path was removed) there is no single
+    # correct answer, so leave the slot blank rather than guess.
     #
     # SECURITY NOTE: this field is advisory display only, never a security
     # boundary — the binding check happens when each client builds the AAD

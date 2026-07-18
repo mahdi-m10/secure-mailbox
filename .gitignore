@@ -70,6 +70,22 @@ blockchain/.env
 blockchain/coverage/
 blockchain/typechain-types/
 
+# Exception: track only the three ABI JSONs graders/clients need to read,
+# not the full compiled artifacts tree (.dbg.json, build-info, etc. stay ignored).
+!blockchain/artifacts/
+blockchain/artifacts/*
+!blockchain/artifacts/contracts/
+blockchain/artifacts/contracts/*
+!blockchain/artifacts/contracts/KeyRegistry.sol/
+!blockchain/artifacts/contracts/MessageReceipt.sol/
+!blockchain/artifacts/contracts/MessageDigest.sol/
+blockchain/artifacts/contracts/KeyRegistry.sol/*
+blockchain/artifacts/contracts/MessageReceipt.sol/*
+blockchain/artifacts/contracts/MessageDigest.sol/*
+!blockchain/artifacts/contracts/KeyRegistry.sol/KeyRegistry.json
+!blockchain/artifacts/contracts/MessageReceipt.sol/MessageReceipt.json
+!blockchain/artifacts/contracts/MessageDigest.sol/MessageDigest.json
+
 # ── C++ / CMake build artifacts ──────────────────────────────
 cpp-client/build/
 CMakeCache.txt

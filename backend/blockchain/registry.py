@@ -20,7 +20,7 @@ from dotenv import load_dotenv
 from web3 import Web3
 from web3.exceptions import ContractLogicError
 
-from backend.blockchain._send_lock import SEND_LOCK
+from backend.blockchain._send_lock import SEND_LOCK, advance_nonce, allocate_nonce
 
 load_dotenv()
 
@@ -130,10 +130,11 @@ def _send(contract_fn) -> str:
     w3, _ = _connect()
     account = w3.eth.account.from_key(_PRIVATE_KEY)
 
-    # Nonce read + broadcast must be atomic across all three contracts'
-    # senders sharing this wallet — see _send_lock.py.
+    # Nonce allocation + broadcast must be atomic across all three
+    # contracts' senders sharing this wallet, and immune to stale
+    # pending-count reads from a load-balanced RPC — see _send_lock.py.
     with SEND_LOCK:
-        nonce = w3.eth.get_transaction_count(account.address, "pending")
+        nonce = allocate_nonce(w3, account.address)
         tx = contract_fn.build_transaction(
             {
                 "from": account.address,
@@ -144,6 +145,7 @@ def _send(contract_fn) -> str:
         )
         signed = w3.eth.account.sign_transaction(tx, _PRIVATE_KEY)
         tx_hash = w3.eth.send_raw_transaction(signed.raw_transaction)
+        advance_nonce(account.address, nonce)
 
     receipt = w3.eth.wait_for_transaction_receipt(tx_hash, timeout=120)
 

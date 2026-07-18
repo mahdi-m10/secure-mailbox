@@ -76,7 +76,7 @@ import hashlib
 import threading
 from datetime import datetime, timezone
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session, aliased
 from web3 import Web3
@@ -85,6 +85,7 @@ from backend import models
 from backend.crypto import build_file_aad
 from backend.database import get_db
 from backend.dependencies import get_current_user
+from backend.limiter import limiter
 from backend.schemas import (
     DetailResponse,
     FileDownloadResponse,
@@ -414,10 +415,13 @@ def _lookup_active_user(username: str, db: Session) -> models.User:
         404: {"description": "Recipient not found"},
         413: {"description": "Request body exceeds the upload size limit"},
         422: {"description": "Schema validation failure (bad nonce length, oversize ciphertext, etc.)"},
+        429: {"description": "Too many uploads from this address"},
     },
 )
+@limiter.limit("20/minute")
 def upload_file(
     body: FileUpload,
+    request: Request,
     current_user: models.User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> dict:
@@ -756,11 +760,14 @@ def delete_file(
         403: {"description": "No read access to this file"},
         404: {"description": "File or recipient not found"},
         409: {"description": "Recipient already has access"},
+        429: {"description": "Too many shares from this address"},
     },
 )
+@limiter.limit("20/minute")
 def share_file(
     file_id: int,
     body: ShareRequest,
+    request: Request,
     current_user: models.User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> dict:

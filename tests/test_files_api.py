@@ -80,6 +80,17 @@ def test_upload_persists_metadata(client, two_users, make_file_payload):
     assert body["owner_username"] == "alice"
 
 
+def test_upload_rate_limit_returns_429_after_twenty(client, two_users, make_file_payload):
+    # Same per-IP pattern as the login limiter (5/min there, 20/min here).
+    for _ in range(20):
+        res = client.post("/files/upload", json=make_file_payload("bob"),
+                          headers=two_users["alice"])
+        assert res.status_code == 201
+    res = client.post("/files/upload", json=make_file_payload("bob"),
+                      headers=two_users["alice"])
+    assert res.status_code == 429
+
+
 # ---------------------------------------------------------------------------
 # Listings
 # ---------------------------------------------------------------------------

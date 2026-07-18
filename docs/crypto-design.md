@@ -602,9 +602,13 @@ legacy data in tests — but no shipped call site passes empty AAD.
    that cannot run. They remain in git history. The live crypto surfaces
    are `hpke.py` + `password.py` (server), `crypto.js` (web), and
    `Crypto.cpp` (C++).
-10. **Denial of service:** rate limiting exists on login only; upload
-    endpoints need size caps + rate limits (networks/pentest work item, noted
-    here for completeness).
+10. **Denial of service:** size caps are enforced twice (schema-level
+    ciphertext cap ≈ 8 MiB plaintext, plus a 16 MiB request-body cap in
+    middleware), and per-IP rate limits cover login (5/min) and the two
+    endpoints that create files — upload and share (20/min each), using the
+    same limiter. Residual: the remaining read endpoints (listings,
+    download, proof) are unlimited, and per-IP keying is weak against a
+    distributed attacker; both accepted for scope.
 11. **`KeyRegistry`/`MessageReceipt` trust boundaries.**
     (a) Registrar-custodial model: the registry's integrity depends on the
     server's registrar wallet key; a compromised server can post arbitrary

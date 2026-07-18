@@ -233,9 +233,17 @@ cd blockchain && npx hardhat test
 - [`docs/crypto-design.md`](docs/crypto-design.md) — threat model (four
   attacker classes), construction walkthrough, parameter-level primitive
   justifications with RFC citations, known limitations, remediation map
+- [`docs/network-architecture.md`](docs/network-architecture.md) — network
+  topology, TLS termination, trust boundaries, external service connections,
+  and ports
+- [`docs/pentest-report.md`](docs/pentest-report.md) — vulnerability and
+  penetration testing report: OWASP-category controls, the tests exercising
+  them, and findings
+- [`docs/deployment.md`](docs/deployment.md) — live Sepolia contract
+  addresses, ABIs, and deployment transactions
+- [`docs/test-plan.md`](docs/test-plan.md) — blockchain test plan and
+  on-chain verification results
 - [`docs/ai-log.md`](docs/ai-log.md) — AI-assisted development log
-- Network Architecture Document and Penetration Testing Report are included
-  in the project submission
 
 ---
 

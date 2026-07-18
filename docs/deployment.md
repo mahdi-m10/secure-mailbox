@@ -15,6 +15,7 @@ separately (via `scripts/deploy.js`) and is untouched by this deployment.
 |---|---|---|
 | `KeyRegistry` | `0x230c56Ab59535625c8eAeF18f8394b7D222a889D` | [address](https://sepolia.etherscan.io/address/0x230c56Ab59535625c8eAeF18f8394b7D222a889D) |
 | `MessageReceipt` | `0x355557d9E5bd1188372986f3ad73b60D992Ef9e5` | [address](https://sepolia.etherscan.io/address/0x355557d9E5bd1188372986f3ad73b60D992Ef9e5) |
+| `MessageDigest` | `0xc8ABe2E8fB438F9120ED63c22ed9074F586586f6` | [address](https://sepolia.etherscan.io/address/0xc8ABe2E8fB438F9120ED63c22ed9074F586586f6) |
 
 ### Deployment transactions
 
@@ -22,6 +23,15 @@ separately (via `scripts/deploy.js`) and is untouched by this deployment.
 |---|---|
 | `KeyRegistry` | [`0x7bebd4cd…db9478ae`](https://sepolia.etherscan.io/tx/0x7bebd4cd6842daa61ce453f8c0539401da4896ef01e6a596dcf92875db9478ae) |
 | `MessageReceipt` | [`0x256d66aa…f76fffab`](https://sepolia.etherscan.io/tx/0x256d66aaf0adf30ff76c08883625d9994378ca7711d9375759d03c2df76fffab) |
+
+### ABIs
+
+The compiled ABI for each contract is tracked in the repo (the rest of
+`blockchain/artifacts/` is a gitignored build output):
+
+- [`KeyRegistry.json`](../blockchain/artifacts/contracts/KeyRegistry.sol/KeyRegistry.json)
+- [`MessageReceipt.json`](../blockchain/artifacts/contracts/MessageReceipt.sol/MessageReceipt.json)
+- [`MessageDigest.json`](../blockchain/artifacts/contracts/MessageDigest.sol/MessageDigest.json)
 
 ## Roles
 

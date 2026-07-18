@@ -707,6 +707,40 @@ legacy data in tests — but no shipped call site passes empty AAD.
     gap the earlier B3/B4 notes referred to when they described reads against
     "a live local node": the contracts the clients read are now live on the
     public testnet.
+12. **Sender key rotation permanently breaks files that sender already sent.**
+    Discovered during manual testing (a vault was recreated, silently rotating
+    its key, after files had already been sent under the old key) and
+    confirmed by direct reproduction against `backend/crypto/hpke.py`'s
+    `encapsulate`/`decapsulate`. Mode_Auth (§5.2) binds the *sender's* static
+    key into `dh2`, and therefore into the derived content key `k`, at encrypt
+    time. The server retains only each user's **current** public key
+    (`users.public_key` — there is no key-history table), and every client
+    code path that decrypts — the TOFU pin check, the "trust new key"
+    override, and the HPKE decapsulation call itself — always fetches and
+    uses that current key. There is no code path, by design, that could use
+    an old key even if one were stored. Consequence: once a sender rotates
+    their key, every file that sender previously sent becomes permanently
+    undecryptable by its recipients; TOFU "trust new key" does not and cannot
+    fix this, because the problem is which key the *ciphertext* was bound to
+    at send time, not which key the recipient currently trusts.
+    This is **distinct from two other, already-documented properties** it is
+    easy to conflate it with: (a) limitation 2 above (no forward secrecy) is
+    about a *compromised* long-term key exposing *past* plaintexts to an
+    attacker — a confidentiality property under key theft, not an
+    availability property under ordinary rotation; (b) the key-rotation
+    warning in `backend/routers/users.py`'s `rotate_key` docstring is about
+    the opposite direction — messages sent *to* a recipient **after** that
+    recipient rotates but encrypted under their *old* fetched key — a
+    transient in-flight problem the sender resolves by re-fetching. This
+    limitation 12 is about the *sender* rotating and *already-delivered*
+    files becoming unrecoverable, with no re-fetch able to help, because the
+    binding is permanent and content-addressed to a key that no longer
+    exists anywhere. Accepted for this project's scope (asynchronous mailbox
+    with no key-history store); a production fix would need the server to
+    retain historical public keys per version (already partially precedented
+    by the on-chain registry's own version-numbered history in 11(i) above)
+    and have decrypt clients try the key that was current at send time
+    rather than only the current one.
 
 ---
 

@@ -1023,21 +1023,41 @@ def download_file(
 
     # ------------------------------------------------------------------
     # Canonical AAD string, rebuilt from stored metadata.
-    # The downloader IS the recipient in the normal case, so their own
-    # username goes in the recipient slot.  (When the owner self-downloads,
-    # the string is a placeholder — the owner cannot decrypt their own
-    # upload anyway, since the content key derives from the recipient's
-    # key pair.)
     #
-    # SECURITY NOTE: a recipient must treat this field as advisory — the
-    # binding check happens when they build the AAD from the same response
-    # fields (owner_username, filename, own username) and the GCM tag
-    # verifies.  A server that tampers with filename here also breaks the
-    # tag, which is the point of binding it.
+    # When the current viewer IS a recipient, their own username is the
+    # true recipient slot. When the OWNER is viewing (self-download / the
+    # verify page), the viewer is not a recipient of their own upload, so
+    # reusing their username there previously produced a wrong display
+    # value (e.g. sender=bob:recipient=bob for a file bob sent to alice —
+    # found via manual testing on verify.html). Resolve the real
+    # recipient(s) from FileAccess instead: with exactly one recipient
+    # (the normal case) show their username; with zero or more than one
+    # (an orphaned row, or the legacy multi-recipient share path) there is
+    # no single correct answer, so leave the slot blank rather than guess.
+    #
+    # SECURITY NOTE: this field is advisory display only, never a security
+    # boundary — the binding check happens when each client builds the AAD
+    # from its own knowledge (owner_username, filename, its own username)
+    # and the GCM tag verifies. A server that tampers with filename here
+    # also breaks the tag, which is the point of binding it.
     # ------------------------------------------------------------------
+    if access is not None:
+        recipient_username = current_user.username
+    else:
+        access_rows = (
+            db.query(models.FileAccess)
+            .filter(models.FileAccess.file_id == file_obj.id)
+            .all()
+        )
+        if len(access_rows) == 1:
+            recipient_user = db.get(models.User, access_rows[0].recipient_id)
+            recipient_username = recipient_user.username if recipient_user else None
+        else:
+            recipient_username = None
+
     aad = _canonical_aad(
         owner.username if owner else None,
-        current_user.username,
+        recipient_username or "",
         file_obj.filename,
     )
 

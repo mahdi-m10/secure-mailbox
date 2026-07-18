@@ -112,6 +112,53 @@ def test_download_marks_file_read(client, two_users, uploaded_file):
 
 
 # ---------------------------------------------------------------------------
+# Associated-data display (GET /files/{id}/download, used by verify.html)
+#
+# Regression test for a bug found via manual UI testing: the recipient slot
+# of the informational `associated_data` field was built from the current
+# *viewer's* username rather than the file's real recipient. This was
+# invisible when the recipient themselves viewed the file (their username IS
+# the recipient), but wrong when the owner viewed their own upload (e.g. via
+# verify.html) — it showed sender=X:recipient=X instead of the true
+# recipient. Cosmetic only: it never affected actual decryption, since each
+# client independently rebuilds the AAD from its own knowledge before
+# decrypting. See docs/crypto-design.md.
+# ---------------------------------------------------------------------------
+
+def test_recipient_view_shows_own_username_in_aad(client, two_users, uploaded_file):
+    res = client.get(f"/files/{uploaded_file}/download", headers=two_users["bob"])
+    assert res.status_code == 200
+    assert res.json()["associated_data"] == (
+        "smx:v1:sender=alice:recipient=bob:filename=test.txt"
+    )
+
+
+def test_owner_view_shows_true_recipient_in_aad(client, two_users, uploaded_file):
+    """The bug: this used to show recipient=alice (the owner) instead of bob."""
+    res = client.get(f"/files/{uploaded_file}/download", headers=two_users["alice"])
+    assert res.status_code == 200
+    assert res.json()["associated_data"] == (
+        "smx:v1:sender=alice:recipient=bob:filename=test.txt"
+    )
+
+
+def test_owner_view_with_ambiguous_recipients_leaves_slot_blank(
+    client, three_users, uploaded_file
+):
+    """Legacy multi-recipient share: no single recipient, so don't guess."""
+    client.post(
+        f"/files/{uploaded_file}/share",
+        json={"recipient_username": "carol"},  # no new_* fields -> legacy path
+        headers=three_users["bob"],
+    )
+    res = client.get(f"/files/{uploaded_file}/download", headers=three_users["alice"])
+    assert res.status_code == 200
+    assert res.json()["associated_data"] == (
+        "smx:v1:sender=alice:recipient=:filename=test.txt"
+    )
+
+
+# ---------------------------------------------------------------------------
 # Delete
 # ---------------------------------------------------------------------------
 

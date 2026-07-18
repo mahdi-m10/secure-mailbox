@@ -757,6 +757,34 @@ legacy data in tests — but no shipped call site passes empty AAD.
     by the on-chain registry's own version-numbered history in 11(i) above)
     and have decrypt clients try the key that was current at send time
     rather than only the current one.
+13. **Vault passphrase is set once — no change or recovery flow.** Both
+    clients require a passphrase when the key vault is created (web: at
+    registration or vault creation/upgrade; C++: at generate/import), and
+    neither offers a way to change it afterwards — the settings modal's
+    "Change Password" covers the *login* password only, which is a
+    different secret by design (§4.5, brief item 3c). The consequences are
+    asymmetric between the clients, stated precisely:
+    - **C++ client — recoverable.** The vault wraps the raw X25519 private
+      key, and the CLI has an import path, so a user who kept a copy of
+      their private key can delete the vault file and re-import under a
+      new passphrase. A change-passphrase command would be a small
+      addition (unlock, then re-create the vault) but does not exist today.
+    - **Web client — not recoverable.** There is deliberately no key
+      export: the unlocked session key is non-extractable (§4.5), and
+      `wrapKey` requires an extractable key, so the existing key cannot be
+      re-wrapped under a new passphrase. A forgotten (or
+      known-compromised) vault passphrase therefore leaves exactly one
+      option — generating a new key pair — which is a key rotation and
+      triggers limitation 12: every file that user previously sent becomes
+      permanently undecryptable by its recipients. The two limitations
+      compound.
+    Accepted for scope: a web change-passphrase flow would need a special
+    unlock that momentarily unwraps the key extractable before re-wrapping
+    (the same brief-extractability exception already accepted at
+    generation time, §4.5) and was judged not worth weakening that
+    invariant's simplicity for. Practical guidance: treat the vault
+    passphrase as unchangeable; C++ users should keep an offline copy of
+    their private key if they anticipate needing to re-vault.
 
 ---
 

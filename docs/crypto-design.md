@@ -628,15 +628,27 @@ legacy data in tests — but no shipped call site passes empty AAD.
     `.../blockchain-proof` expose receipt status. **No client yet performs
     the pre-encrypt registry check or refuses on a revoked key** — that is
     B3 (client integration); see the remediation map.
-    (d) **Shared-wallet nonce race, found and fixed during B2 integration
-    testing**: `MessageDigest`, `KeyRegistry`, and `MessageReceipt` are all
-    signed by the same registrar/deployer wallet, and a single upload fires
-    a digest-anchor thread and a receipt thread concurrently — both read
-    `get_transaction_count(..., "pending")` before broadcasting, which is
-    not atomic, so the second send was rejected ("nonce too low") when
-    tested against a live local node. Fixed with a process-wide lock held
-    only across the nonce-read→sign→broadcast step (not the slower
-    confirmation wait), shared by all three contracts' send paths.
+    (d) **Shared-wallet nonce races — two found, both fixed.**
+    `MessageDigest`, `KeyRegistry`, and `MessageReceipt` are all signed by
+    the same registrar/deployer wallet. First race (B2 integration
+    testing): a single upload fires a digest-anchor thread and a receipt
+    thread concurrently — both read `get_transaction_count(..., "pending")`
+    before broadcasting, which is not atomic, so the second send was
+    rejected ("nonce too low"). Fixed with a process-wide lock held only
+    across the nonce-read→sign→broadcast step (not the slower confirmation
+    wait), shared by all three contracts' send paths. Second race
+    (observed in production against Sepolia, single process and single
+    wallet): public RPC endpoints are load-balanced clusters, so a
+    pending-count read can hit a backend that has not yet seen a
+    transaction this same process broadcast moments earlier, re-issuing
+    its nonce ("replacement transaction underpriced") — a stale value
+    from outside the process, which no in-process lock can prevent. Fixed
+    with a per-address next-nonce cache in the same module: allocation
+    takes `max(chain_pending, cached)` under the lock, the cache advances
+    only after a successful broadcast, and entries expire after 120 s so a
+    broadcast-then-dropped transaction cannot wedge later sends behind a
+    nonce gap. Verified live against a Hardhat node with a
+    frozen-pending-count simulation of the stale backend.
     (e) `?onchain=1` is opt-in on `GET /users/{username}` and not offered on
     the bulk `GET /users` listing at all — a per-user live RPC read for a
     500-row page would mean up to 500 sequential RPC calls per request.

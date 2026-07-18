@@ -795,8 +795,15 @@ async function handleDownload(fileId, btn) {
   } catch (err) {
     alert(
       `Decryption failed.\n\n${err.message}\n\n` +
-      'If this persists it can mean the ciphertext was tampered with, the ' +
-      'filename was relabelled, or the uploader\'s key does not match.'
+      'This file cannot be recovered by retrying. The most likely cause is ' +
+      'benign: the sender rotated their key (new device, or re-created their ' +
+      'vault) after sending this file — Mode_Auth binds a file to the key its ' +
+      'sender held at the time, so a later key change on their side makes it ' +
+      'permanently undecryptable, even after a TOFU "trust new key" override. ' +
+      'Ask the sender to re-send the file under their current key. ' +
+      'Less likely, but worth ruling out if this is unexpected: the stored ' +
+      'ciphertext was tampered with, or the filename was relabelled by the ' +
+      'server after upload — both are also detected as this same error.'
     );
   } finally {
     btn.disabled = false;

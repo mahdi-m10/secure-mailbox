@@ -547,17 +547,17 @@ legacy data in tests — but no shipped call site passes empty AAD.
    explicit override re-pins), so key substitution against established pairs
    is detected. The residual gap is inherent to TOFU: the very first fetch of
    a peer's key is trusted unverified, and a user can click through the
-   mismatch warning. **The on-chain `KeyRegistry` contract (blockchain
-   scope, contracts + unit tests landed this chunk) is the mitigation this
-   section anticipated**: a server-custodial registrar posts each user's key
-   on Sepolia at registration, so a substitution is either publicly visible
-   as a contradicting on-chain event or requires the server to serve a key
-   that disagrees with the chain — detectable by any client that checks.
-   Precise scope of the claim, stated so it is not overclaimed: this is a
-   **public transparency log**, not a trustless PKI — a registrar that lies
-   from a user's very first registration is still undetectable, and until
-   the client-integration sub-chunk lands, no client actually performs the
-   on-chain check, so TOFU remains the only *live* mitigation today.
+   mismatch warning. **The on-chain `KeyRegistry` contract is the second,
+   independent mitigation, and it is fully live**: a server-custodial
+   registrar posts each user's key on Sepolia at registration, and both
+   clients check the registry directly (never via the mailbox server) at
+   every encrypt and decrypt call site — see 11(f)–(g) below for the
+   mechanism and outcome table. A substitution is therefore either publicly
+   visible as a contradicting on-chain event or requires the server to
+   serve a key that disagrees with the chain, which the client check
+   surfaces. Precise scope of the claim, stated so it is not overclaimed:
+   this is a **public transparency log**, not a trustless PKI — a registrar
+   that lies from a user's very first registration is still undetectable.
    Out-of-band fingerprint comparison remains a complementary defence
    either way.
 2. **No forward secrecy / no post-compromise security** (§3(d)5) — accepted
@@ -757,7 +757,7 @@ legacy data in tests — but no shipped call site passes empty AAD.
 | §8.11 receipt evidence | `MessageReceipt.sol` deployed + unit-tested (B1). **Backend wired (B2)**: server posts a receipt in the background after every accepted upload/share; `GET /files/{id}/download` and `.../blockchain-proof` surface status (informational, fail-open). Clients poll after upload and surface confirmation/pending in the UI (B4). **Deployed live to Sepolia and a receipt posted on-chain (B5)** — see docs/deployment.md / docs/test-plan.md | B1 (landed) → B2 (landed) → B4 (UI) → B5 (live) |
 | §8.4 AAD | **Done — enforcement live at every call site in both clients** (canonical username/filename form; file ID excluded — unbindable pre-upload; no AAD-less fallback). Residual: same-pair duplication | Web + C++ rework chunks (landed) |
 | §8.3 key-at-rest | **Done — both clients.** C++: Argon2id(passphrase, dedicated salt/params) → XSalsa20-Poly1305 key-wrap vault (secretbox chosen over AES-GCM so the vault opens without AES-NI). Web: PBKDF2-HMAC-SHA256 (600k, dedicated salt) → AES-256-GCM via `wrapKey`/`unwrapKey`; session key non-extractable; legacy keys replaced via upgrade flow. Residual: PBKDF2 not memory-hard (§8.3) | C++ + web key-vault chunks (landed) |
-| §8.6 upload cap | Enforced max upload size + documented limit | Files-router chunk |
+| §8.6 upload cap | **Done.** Schema-level ciphertext cap (~8 MiB plaintext) + 16 MiB request-body middleware cap; upload/share rate-limited 20/min/IP (§8.10) | Files-router chunk (landed) |
 
 ---
 

@@ -10,9 +10,10 @@ them on their own schedule. The Python/FastAPI backend stores only ciphertext �
 all encryption and decryption happen on the client using HPKE Mode\_Auth
 (RFC 9180 construction) over X25519, with the file's context (sender,
 recipient, filename) bound into the AEAD so the server cannot relabel stored
-files undetected. Each file's keccak256 integrity hash is anchored on the
-Ethereum Sepolia testnet via a Solidity smart contract, providing a
-tamper-evident audit trail. A C++17 CLI client built with libsodium is
+files undetected. Three Solidity contracts on the Ethereum Sepolia testnet
+anchor each file's keccak256 integrity hash, maintain a public-key
+transparency log that both clients check before encrypting, and record
+server-signed upload receipts. A C++17 CLI client built with libsodium is
 included alongside the browser-based web client; ciphertexts are fully
 interoperable across the Python reference implementation, the web client, and
 the C++ client.
@@ -32,7 +33,9 @@ the C++ client.
                                                     │ HTTPS
                                        ┌────────────▼────────────┐
                                        │  Ethereum Sepolia       │
-                                       │  MessageDigest Contract │
+                                       │  MessageDigest /        │
+                                       │  KeyRegistry /          │
+                                       │  MessageReceipt         │
                                        └─────────────────────────┘
 ```
 
@@ -68,10 +71,17 @@ web client wraps its key with AES-256-GCM under a PBKDF2-HMAC-SHA256 key
 non-extractable; the C++ client uses an Argon2id → XSalsa20-Poly1305 vault
 file. Neither client has a path that operates with an unprotected key.
 
-**Blockchain** — Every file's keccak256 digest is recorded via the
-`MessageDigest` Solidity contract on Sepolia. A local SHA-256 block chain in
-SQLite provides secondary tamper evidence. The web client includes a
-dedicated verification page for on-chain proof.
+**Blockchain** — Three Solidity contracts live on Sepolia. `MessageDigest`
+records every file's keccak256 digest (tamper-evident audit trail; a local
+SHA-256 block chain in SQLite provides secondary evidence). `KeyRegistry` is
+a public transparency log of user public keys, keyed by
+`keccak256(username)`: the server registers/rotates keys on-chain, and both
+clients read the registry **directly** over a public RPC (from-scratch
+Keccak-256 in JS and C++) as a fail-closed pre-encrypt gate — a compromised
+server cannot answer its own integrity check. `MessageReceipt` anchors a
+server-signed receipt for every accepted upload. The web client includes a
+file-proof verification page and a key verification page that cross-checks
+chain, server, and local TOFU pin.
 
 ---
 
@@ -81,7 +91,9 @@ dedicated verification page for on-chain proof.
 |----------|-----|
 | Web application | <https://team10.theburkenator.com/app/> |
 | API docs (Swagger) | <https://team10.theburkenator.com/docs> |
-| Smart contract (Sepolia) | [`0xc8ABe2E8fB438F9120ED63c22ed9074F586586f6`](https://sepolia.etherscan.io/address/0xc8ABe2E8fB438F9120ED63c22ed9074F586586f6) |
+| `MessageDigest` (Sepolia) | [`0xc8ABe2E8fB438F9120ED63c22ed9074F586586f6`](https://sepolia.etherscan.io/address/0xc8ABe2E8fB438F9120ED63c22ed9074F586586f6) |
+| `KeyRegistry` (Sepolia) | [`0x230c56Ab59535625c8eAeF18f8394b7D222a889D`](https://sepolia.etherscan.io/address/0x230c56Ab59535625c8eAeF18f8394b7D222a889D) |
+| `MessageReceipt` (Sepolia) | [`0x355557d9E5bd1188372986f3ad73b60D992Ef9e5`](https://sepolia.etherscan.io/address/0x355557d9E5bd1188372986f3ad73b60D992Ef9e5) |
 
 ---
 
@@ -103,22 +115,31 @@ secure-mailbox/
 │   │   ├── hpke.py           # HPKE Mode_Auth (X25519) + canonical AAD builder
 │   │   └── password.py       # Argon2id
 │   └── blockchain/
-│       └── contract.py       # Web3.py interface to MessageDigest
+│       ├── contract.py       # Web3.py interface to MessageDigest
+│       ├── registry.py       # KeyRegistry: register/rotate/revoke + reads
+│       ├── receipts.py       # MessageReceipt: post + read receipts
+│       └── _send_lock.py     # Shared-wallet nonce serialisation lock
 ├── blockchain/
-│   ├── contracts/MessageDigest.sol
-│   ├── scripts/deploy.js
-│   └── test/MessageDigest.test.js
+│   ├── contracts/            # MessageDigest.sol, KeyRegistry.sol, MessageReceipt.sol
+│   ├── scripts/              # deploy.js, deploy-registry.js, lifecycle helpers
+│   ├── test/                 # Hardhat unit tests for all three contracts
+│   └── artifacts/…/*.json    # Tracked ABIs (rest of the build tree gitignored)
 ├── cpp-client/               # C++17 CLI (libcurl, libsodium, CMake)
-│   ├── include/              # Crypto, KeyVault, PinStore, File(Store), Client
-│   └── src/
+│   ├── include/              # Crypto, KeyVault, PinStore, File(Store), Chain, Client
+│   └── src/                  # incl. from-scratch Keccak-256 + eth_call reads
 ├── web-client/               # Static frontend served at /app
 │   ├── index.html            # Login / registration (incl. vault passphrase)
 │   ├── files.html            # File mailbox (upload, share, TOFU, vault unlock)
-│   └── verify.html           # Blockchain proof verification
+│   ├── verify.html           # Blockchain proof verification
+│   └── verify-key.html       # Key verification (chain vs server vs TOFU pin)
 ├── docs/
 │   ├── crypto-design.md      # Cryptographic design document
+│   ├── network-architecture.md # Topology, TLS, trust boundaries, external services
+│   ├── pentest-report.md     # Vulnerability & penetration testing report
+│   ├── deployment.md         # Live Sepolia addresses, ABIs, deployment txs
+│   ├── test-plan.md          # Blockchain test plan + on-chain verification
 │   └── ai-log.md             # AI-assisted development log
-├── tests/                    # Python pytest suite (51 tests)
+├── tests/                    # Python pytest suite (72 tests)
 └── .env.example
 ```
 
@@ -213,15 +234,18 @@ uvicorn backend.main:app --host 0.0.0.0 --port 80
 
 ## Testing
 
-**Python — 51 tests** (auth, username validation, file access control, AAD
-canonicalisation and enforcement, /files endpoint behaviour, end-to-end
-crypto with compromised-server simulations)
+**Python — 72 tests** (auth incl. rate limiting, username validation, file
+access control, AAD canonicalisation and enforcement, /files endpoint
+behaviour, end-to-end crypto with compromised-server simulations, and
+backend blockchain integration)
 ```bash
 source venv/bin/activate
 pytest tests/ -v
 ```
 
-**Smart contract — 5 tests** (deploy, record, getDigest, duplicate rejection, owner-only)
+**Smart contracts — 31 tests** across `KeyRegistry` (17), `MessageReceipt`
+(9), and `MessageDigest` (5): lifecycle, access control, duplicate
+rejection, and event assertions
 ```bash
 cd blockchain && npx hardhat test
 ```
@@ -275,10 +299,16 @@ cd blockchain && npx hardhat test
 
 ---
 
-## Smart Contract
+## Smart Contracts
 
-`MessageDigest` — append-only on-chain hash registry deployed on Ethereum Sepolia:  
-[`0xc8ABe2E8fB438F9120ED63c22ed9074F586586f6`](https://sepolia.etherscan.io/address/0xc8ABe2E8fB438F9120ED63c22ed9074F586586f6)
+All three deployed live on Ethereum Sepolia (details, deployment txs, and
+tracked ABIs in [docs/deployment.md](docs/deployment.md)):
+
+| Contract | Purpose | Address |
+|---|---|---|
+| `MessageDigest` | Append-only file-hash registry (tamper evidence) | [`0xc8ABe2E8…6586f6`](https://sepolia.etherscan.io/address/0xc8ABe2E8fB438F9120ED63c22ed9074F586586f6) |
+| `KeyRegistry` | Public-key transparency log (register/rotate/revoke, versioned) | [`0x230c56Ab…2a889D`](https://sepolia.etherscan.io/address/0x230c56Ab59535625c8eAeF18f8394b7D222a889D) |
+| `MessageReceipt` | Server-signed receipts for accepted uploads | [`0x355557d9…2Ef9e5`](https://sepolia.etherscan.io/address/0x355557d9E5bd1188372986f3ad73b60D992Ef9e5) |
 
 ---
 

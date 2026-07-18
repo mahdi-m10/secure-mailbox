@@ -4,8 +4,8 @@
 |---|---|
 | **Module** | CS4436/CS4455 Cybersecurity — Epic Project (July 2026 repeat) |
 | **Component** | Cryptography (Eoin O'Brien) |
-| **Version** | 0.1 (draft) |
-| **Status** | Describes the implementation as it exists today. Sections 7–9 name gaps honestly and map them to planned remediation steps. |
+| **Version** | 1.0 |
+| **Status** | Describes the implementation as merged to `main`. Section 8 names known, accepted limitations honestly rather than hiding them; none are outstanding remediation work blocking submission. |
 
 ---
 
@@ -23,12 +23,17 @@ Three components share one wire-compatible encryption scheme:
 - **Web client** — HTML/JS using the Web Crypto API (`web-client/`).
 - **C++ desktop client** — libsodium + libcurl (`cpp-client/`).
 
-**Terminology note.** The codebase currently uses *message* terminology
+**Terminology note.** The codebase has been renamed from *message* terminology
 (`Message`, `/messages/send`, …) inherited from the previous iteration of the
-project; the rename to file terminology (`FileObject`, `/files/upload`, …) is a
-separate, purely mechanical refactor. Cryptographically a "file" is a byte string
-exactly like a "message"; nothing in this document changes with the rename. This
-document uses mailbox terms (*upload*, *download*, *file*) throughout.
+project to file terminology (`FileObject`, `/files/upload`, …); that rename is
+complete. Cryptographically a "file" is a byte string exactly like a "message",
+so nothing in this document changes because of it. This document uses mailbox
+terms (*upload*, *download*, *file*) throughout. One wire constant is
+deliberately **not** renamed: the HPKE `info` string is still the literal bytes
+`b"secure-messenger"` (`backend/crypto/hpke.py`, `web-client/js/crypto.js`) —
+it is an HKDF domain-separation label, not a user-facing term, and changing it
+would silently break interoperability with any ciphertext already produced
+under the old label.
 
 **Scheme summary.** End-to-end encryption uses HPKE **Mode_Auth**
 (RFC 9180 [1]) assembled from vetted primitives:
@@ -344,6 +349,22 @@ signature, and the same value binds the ciphertext to the recipient (only
 `skR` recomputes `dh2` on the other side). This yields the brief's requirement
 that recipients verify origin — with the §3(d)1 caveat about key directory
 trust, and the §3(d)6 KCI caveat inherent to the mode.
+
+**Offline deniability, and its limit.** Because `dh2 = X25519(skS, pkR) =
+X25519(skR, pkS)` is a *shared* value either party could compute alone, a
+successfully-decrypting recipient cannot use the ciphertext to prove to a
+third party that Alice sent it — Bob holds `skR` and could have derived the
+identical `dh2` (and hence `k`) himself, so the "signature" is not
+non-repudiable the way an actual digital signature would be. This mirrors the
+Signal/X3DH deniability argument (module slides, lecture08, slide 39): if
+someone steals a transcript offline and shows it to a judge, the judge cannot
+conclude Alice authored it, because Bob (or anyone holding `skR`) could have
+forged the same proof. This guarantee is narrow and does **not** hold in
+general: an *online* judge who can interactively challenge Alice and Bob
+(rather than being handed a static transcript), or an attacker who has
+compromised either party's long-term key, breaks it. It is also not a design
+goal stated anywhere in the module brief — it is a side effect of Mode_Auth
+worth naming honestly rather than a claimed feature.
 
 ### 5.3 KDF: HKDF-SHA256, and the nonce strategy
 

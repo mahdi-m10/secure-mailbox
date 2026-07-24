@@ -49,9 +49,10 @@ HS256 JWTs for API access; long-lived refresh tokens stored server-side
 5 requests per minute per IP.
 
 **File mailbox** — Encrypt-and-upload a file for a recipient (~8 MiB cap,
-enforced twice: schema validator + request-size middleware), list files
-shared with you and files you uploaded, download-and-decrypt, share with
-further recipients (client-side re-encryption — the server cannot re-target a
+enforced twice: schema validator + request-size middleware; upload and share
+are rate-limited to 20 requests per minute per IP), list files shared with
+you and files you uploaded, download-and-decrypt, share with further
+recipients (client-side re-encryption — the server cannot re-target a
 ciphertext), revoke access (targeted or all recipients), and soft-delete.
 Access-control failures return 404, not 403, to prevent IDOR probing.
 

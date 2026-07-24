@@ -316,7 +316,10 @@ never printed and never persisted unwrapped; generation and import both
 copies are zeroed with `sodium_memzero` on logout/exit.
 
 **Tokens.** Access JWT + refresh token in browser `localStorage`
-(XSS-readable — accepted risk, mitigated by CSP and short JWT expiry);
+(XSS-readable — accepted risk). The mitigations are output escaping at
+every render site and the short (30 min) access-token expiry, *not* the
+CSP: the deployed policy carries `script-src 'self' 'unsafe-inline'`, so
+it would not stop an injected inline script (see `pentest-report.md` §4).
 C++ client holds tokens in memory only.
 
 ---

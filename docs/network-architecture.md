@@ -57,7 +57,7 @@ Set in `backend/main.py`:
 | CORS `allow_origins` | `https://team10.theburkenator.com` only | Blocks cross-origin browser calls from other sites |
 | CORS `allow_credentials` | `false` | Tokens travel in the `Authorization` header, not cookies — no ambient credential replay |
 | CORS `allow_methods` | `GET, POST, PUT, DELETE` | Least-privilege method set |
-| Content-Security-Policy | `default-src 'self'`; `connect-src 'self' <gateway> https://ethereum-sepolia-rpc.publicnode.com` | Restricts script/style/connect origins; the explicit Sepolia RPC entry is what permits the client-side on-chain key lookup |
+| Content-Security-Policy | `default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; connect-src 'self' <gateway> https://ethereum-sepolia-rpc.publicnode.com` | Confines fetch/XHR/WebSocket targets to the app origin plus the declared Sepolia RPC — the `connect-src` entry is what permits the client-side on-chain key lookup. Note `'unsafe-inline'` on `script-src`: inline scripts are permitted, so this policy is **not** an XSS control (XSS is handled by output escaping — see `pentest-report.md` §4) |
 | `X-Frame-Options` | `DENY` | Clickjacking |
 | `X-Content-Type-Options` | `nosniff` | MIME sniffing |
 | `Referrer-Policy` | `no-referrer` | Referrer leakage |

@@ -6,6 +6,7 @@
 | **Component** | Cryptography (Eoin O'Brien) |
 | **Version** | 1.0 |
 | **Status** | Describes the implementation as merged to `main`. Section 8 names known, accepted limitations honestly rather than hiding them; none are outstanding remediation work blocking submission. |
+| **Note on the blockchain brief** | The deployed contracts **deliberately do not match the blockchain brief's literal function signatures** (`msg.sender`-keyed `register`/`rotate`/`revoke`/`getKey(address)`, `serverSig`). The application's users hold no Ethereum wallets, so the registry is registrar-custodial and keyed by `keccak256(username)`. The deviation, what it preserves, and what it costs are set out in full in **§8.11(0)**. |
 
 ---
 
@@ -621,6 +622,45 @@ legacy data in tests — but no shipped call site passes empty AAD.
     download, proof) are unlimited, and per-IP keying is weak against a
     distributed attacker; both accepted for scope.
 11. **`KeyRegistry`/`MessageReceipt` trust boundaries.**
+
+    **(0) DELIBERATE DEVIATION FROM THE BLOCKCHAIN BRIEF'S LITERAL
+    INTERFACE — stated plainly rather than left to be inferred.** The
+    contracts as built do **not** match the function signatures the
+    blockchain brief specifies. The brief describes a wallet-centric,
+    `msg.sender`-keyed interface; this implementation is
+    registrar-custodial and keyed by `keccak256(username)`:
+
+    | Brief's literal interface | As implemented | Why |
+    |---|---|---|
+    | `register(bytes32 key)` keyed by `msg.sender` | `registerKey(bytes32 identity, bytes32 x25519Key)`, `onlyRegistrar` | Application users hold **no Ethereum wallets and no ETH**. A `msg.sender`-keyed registry would require every user to fund and manage a wallet to register a key — impossible for this application's user model. |
+    | `rotate(bytes32 newKey)` keyed by `msg.sender` | `rotateKey(bytes32 identity, bytes32 newX25519Key)`, `onlyRegistrar` | Same reason. |
+    | `revoke()` keyed by `msg.sender` | `revokeKey(bytes32 identity)`, `onlyRegistrar` | Same reason. |
+    | `getKey(address user)` | `getKey(bytes32 identity)` → `(key, version, updatedAt, revoked)` | With no per-user wallets there is no `address` to key on. `keccak256(username)` is the identity, computed independently by each client (§8.11(f)) so the lookup does not depend on the server. |
+    | `serverSig` field inside the receipt payload | No in-payload signature field; the receipt's authenticity comes from the **transaction signature itself** (`onlyServer`, enforced on-chain) | An explicit `serverSig` inside a transaction already signed by the server wallet is redundant: the EVM has verified `msg.sender == server` before the call executes. Storing a second signature would cost gas to record something the transaction envelope already proves. |
+
+    **What the deviation preserves** (i.e. what the brief was asking for,
+    delivered by different signatures): the full register → rotate →
+    revoke → lookup lifecycle; monotonic `version` numbering; a preserved,
+    still-readable record after revocation (so clients distinguish
+    "revoked" from "never registered"); indexed `KeyRegistered` /
+    `KeyRevoked` / `ReceiptPosted` events as the public audit trail;
+    replay/duplicate protection (re-registering an existing identity and
+    double-revoking both revert; a duplicate receipt hash reverts);
+    role-restricted writes with transferable roles; and per-receipt
+    `(ciphertextHash, senderHash, recipientHash, timestamp, blockNumber)`.
+    All of this is exercised by 31 Hardhat tests and verified live on
+    Sepolia (`docs/test-plan.md`).
+
+    **What the deviation costs, honestly.** Under the brief's literal
+    interface a user's own wallet key authorises their registration, so
+    the server cannot register or revoke on their behalf. Here it can —
+    which is exactly the residual documented in (a) below. The deviation
+    buys a system that actually works for wallet-less users at the price
+    of a weaker trust story, and that price is the reason this section
+    describes the registry as a *public transparency log, not a trustless
+    PKI*. A wallet-per-user design would be the right answer for a
+    production system whose users already hold wallets.
+
     (a) Registrar-custodial model: the registry's integrity depends on the
     server's registrar wallet key; a compromised server can post arbitrary
     (mis)registrations as easily as it can lie off-chain — the value is

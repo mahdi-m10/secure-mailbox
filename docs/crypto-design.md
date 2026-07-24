@@ -134,17 +134,23 @@ arbitrary responses.
    undetectably. What TOFU cannot fix: the **first** contact — a server that
    substitutes a key before any pin exists still wins that pair, and a user
    who blindly clicks through the override warning re-opens the hole.
-   Out-of-band fingerprint comparison (both clients display fingerprints) or
-   the proposed blockchain key registry would close first-contact trust.
-   **Status: the on-chain `KeyRegistry` contract now exists** (registration,
-   rotation, revocation, public `getKey` lookup — §9), but as of this chunk
-   no client consults it before encrypting; TOFU pinning remains the only
-   live mitigation until the client-integration sub-chunk lands. See §8.1
-   for the registry's own trust-model residual once it is wired in.
+   Out-of-band fingerprint comparison (both clients display fingerprints)
+   and the on-chain key registry both narrow first-contact trust.
+   **Status: the `KeyRegistry` contract is deployed on Sepolia and both
+   clients consult it before encrypting** (registration, rotation,
+   revocation, public `getKey` lookup), reading the chain directly rather
+   than through the mailbox server, and failing closed when the read is
+   unavailable — see §8.11(f)–(g) for the outcome table. TOFU pinning is
+   therefore no longer the only live mitigation. See §8.1 for the
+   registry's own trust-model residual: it is a public transparency log,
+   not a trustless PKI.
 2. **Availability & completeness.** The server can drop, withhold, reorder, or
    duplicate files, or lie in listings. Asynchronous store-and-forward cannot
-   prevent this; it can at best be made evident (out of scope here; the
-   blockchain component may address receipt evidence).
+   prevent this; it can at best be made evident, which is what the deployed
+   `MessageReceipt` contract does — the server posts a receipt for every
+   accepted upload, so a withheld file is one it either never receipted or
+   receipted and then failed to serve (§8.11(b) states the limits of that
+   evidence precisely).
 3. **Replay to the same recipient.** The server can re-deliver a stored
    Alice→Bob ciphertext as a "new" file. It decrypts correctly and appears as a
    duplicate. Binding to a per-file identifier via AEAD associated data would
@@ -206,7 +212,9 @@ Sender (before upload)                    │
 The key directory is the server. **Trust model: TOFU-with-pinning**, pin
 implemented and enforced in both clients (§3(d)1, §8.1). The on-chain
 KeyRegistry (§8.11) is an additional, complementary check on this same
-lookup — not yet consulted by any client as of this chunk (§9).
+lookup, and both clients now perform it — reading the registry directly
+over JSON-RPC rather than through the mailbox server, at every encrypt and
+decrypt call site (§8.11(f)–(g)).
 
 ### 4.3 Upload (encrypt) — HPKE Mode_Auth encapsulation
 
@@ -656,8 +664,9 @@ legacy data in tests — but no shipped call site passes empty AAD.
     the bulk `GET /users` listing at all — a per-user live RPC read for a
     500-row page would mean up to 500 sequential RPC calls per request.
     On-chain lookups here fail open (`onchain: null` + `onchain_error`);
-    this is informational display, not the security gate — the client-side
-    pre-encrypt check that must fail closed is still B3.
+    this is informational display, not the security gate — the gate that
+    must fail closed is the clients' own pre-encrypt registry check, which
+    they perform directly against the chain (see (f)–(g) below).
     (f) **Client-side registry reads (B3a, landed)** deliberately bypass the
     mailbox server entirely: each client computes `keccak256(username)`
     itself (Keccak-256 implemented from scratch in both clients — no

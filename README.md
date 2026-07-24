@@ -139,7 +139,7 @@ secure-mailbox/
 │   ├── deployment.md         # Live Sepolia addresses, ABIs, deployment txs
 │   ├── test-plan.md          # Blockchain test plan + on-chain verification
 │   └── ai-log.md             # AI-assisted development log
-├── tests/                    # Python pytest suite (72 tests)
+├── tests/                    # Python pytest suite (78 tests)
 └── .env.example
 ```
 
@@ -234,10 +234,10 @@ uvicorn backend.main:app --host 0.0.0.0 --port 80
 
 ## Testing
 
-**Python — 72 tests** (auth incl. rate limiting, username validation, file
+**Python — 78 tests** (auth incl. rate limiting, username validation, file
 access control, AAD canonicalisation and enforcement, /files endpoint
-behaviour, end-to-end crypto with compromised-server simulations, and
-backend blockchain integration)
+behaviour, end-to-end crypto with compromised-server simulations, backend
+blockchain integration, and on-chain nonce allocation)
 ```bash
 source venv/bin/activate
 pytest tests/ -v

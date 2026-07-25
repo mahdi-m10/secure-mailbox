@@ -7,23 +7,23 @@ in the project README.
 ## 1. Topology
 
 ```
-   CLIENT DEVICES (trusted)                EDGE                 SERVER (untrusted)
- ┌──────────────────────┐                                   ┌────────────────────────┐
- │ Web client           │                                   │  Ubuntu VM             │
- │ (Web Crypto API,     │──── HTTPS/TLS ─┐   ┌── HTTP :80 ──▶│  FastAPI (uvicorn)     │
- │  served from /app)   │                │   │               │  ├─ /auth /users /files│
- └──────────────────────┘         ┌──────▼───┴─────────┐     │  ├─ /app (web client)  │
- ┌──────────────────────┐         │  TLS Gateway /      │     │  └─ SQLite DB (file)   │
- │ C++ CLI client       │──── HTTPS/TLS ─▶ reverse proxy│     └───────────┬────────────┘
- │ (libcurl + libsodium)│         │  team10.theburken…  │                 │ HTTPS
- └──────────┬───────────┘         └─────────────────────┘                 │ (write: register/
-            │ HTTPS (read: eth_call)                                      │  rotate/receipt/
-            │                                                             │  digest)
-            └───────────────┐                            ┌────────────────▼────────────┐
-                            └──── HTTPS (read: eth_call) ▶│  Ethereum Sepolia testnet    │
-                                                          │  MessageDigest / KeyRegistry │
-   Web client also reads the chain directly ────────────▶│  / MessageReceipt contracts  │
-   (connect-src allows the public RPC)                   └──────────────────────────────┘
+ CLIENT DEVICES (trusted)     EDGE                   SERVER (untrusted)
+ ┌──────────────────────┐   ┌──────────────────┐   ┌──────────────────────────┐
+ │ Web client           │   │  TLS Gateway /   │   │  Ubuntu VM               │
+ │ (Web Crypto API,     │──>│  reverse proxy   │──>│  FastAPI (uvicorn)       │
+ │  served from /app)   │   │                  │   │   - /auth /users /files  │
+ ├──────────────────────┤   │  team10...       │   │   - /app (web client)    │
+ │ C++ CLI client       │──>│                  │   │   - SQLite DB (file)     │
+ │ (libcurl + libsodium)│   │  HTTPS/TLS       │   │                          │
+ └──────────┬───────────┘   └──────────────────┘   └────────────┬─────────────┘
+            │                                                   │ HTTPS writes:
+            │ HTTPS (eth_call reads, direct to chain)           │ keys, receipts, digests
+            │                                                   v
+            │               ┌─────────────────────────────────────────────────┐
+            └──────────────>│  Ethereum Sepolia testnet                       │
+                            │  MessageDigest / KeyRegistry /                  │
+                            │  MessageReceipt contracts                       │
+                            └─────────────────────────────────────────────────┘
 ```
 
 ## 2. Transport security (TLS)

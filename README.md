@@ -199,7 +199,7 @@ Copy `.env.example` to `.env`. **Never commit `.env`.**
 | `SECRET_KEY` | JWT signing key — `python -c "import secrets; print(secrets.token_hex(32))"` |
 | `ALGORITHM` | JWT algorithm — `HS256` |
 | `ACCESS_TOKEN_EXPIRE_MINUTES` | JWT lifetime in minutes |
-| `DATABASE_URL` | SQLAlchemy URL — `sqlite:///./secure_messenger.db` |
+| `DATABASE_URL` | SQLAlchemy URL — `sqlite:///./secure_mailbox.db` |
 | `APP_ENV` | `development` or `production` |
 | `DEBUG` | `true` / `false` |
 | `SEPOLIA_RPC_URL` | Sepolia HTTPS RPC endpoint |

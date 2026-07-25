@@ -70,7 +70,7 @@ Set in `backend/main.py`:
 | Backend | Ethereum Sepolia RPC (`SEPOLIA_RPC_URL`) | HTTPS | **Writes**: register/rotate keys, post receipts, anchor digests | `DEPLOYER_PRIVATE_KEY` (registrar/server wallet) — env only, never committed |
 | Web client | Sepolia public RPC (`ethereum-sepolia-rpc.publicnode.com`) | HTTPS | **Reads**: `eth_call` to `KeyRegistry.getKey` before encrypting | none (keyless public node) |
 | C++ client | Sepolia public RPC (same) | HTTPS | Same read-path key lookup | none |
-| Backend | SQLite database file (`secure_messenger.db`) | local file I/O | Ciphertext + metadata store | filesystem perms |
+| Backend | SQLite database file (`secure_messenger.db` — the deployed file predates the naming cleanup; new deployments following `.env.example` create `secure_mailbox.db`) | local file I/O | Ciphertext + metadata store | filesystem perms |
 
 Design note on the two RPC paths: the clients read the chain **directly**
 over a keyless public node rather than proxying through the backend. This is

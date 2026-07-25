@@ -89,10 +89,14 @@ the server's environment.
    sees ciphertext + metadata, never plaintext or private keys.
 3. **Backend VM + database** — **untrusted** (the design's `(d)` threat class,
    `crypto-design.md` §3). Assumed potentially fully compromised: it stores
-   only opaque AEAD blobs and public keys, and cannot read plaintext, forge a
-   sender, or tamper undetectably. Access control (JWT + ownership checks) is
-   a defence-in-depth layer on top of E2EE, not the primary confidentiality
-   control.
+   only opaque AEAD blobs and public keys and cannot read plaintext or tamper
+   undetectably. Sender forgery specifically is TOFU-pinned, not
+   cryptographically excluded outright: for any pair that has already
+   communicated, the server cannot substitute a sender's key undetectably
+   (`crypto-design.md` §3(d)1); a server that substitutes a key before the
+   pair's first contact is not caught by this mechanism. Access control
+   (JWT + ownership checks) is a defence-in-depth layer on top of E2EE, not
+   the primary confidentiality control.
 4. **Ethereum Sepolia** — public, append-only ledger. Contains no secrets:
    only public keys, `keccak256(username)` identity hashes, and ciphertext
    digests. Serves as a transparency log the clients cross-check against.

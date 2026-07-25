@@ -6,7 +6,7 @@
 | **Component** | Cryptography (Eoin O'Brien) |
 | **Version** | 1.0 |
 | **Status** | Describes the implementation as merged to `main`. Section 8 names known, accepted limitations honestly rather than hiding them; none are outstanding remediation work blocking submission. |
-| **Note on the blockchain brief** | The deployed contracts **deliberately do not match the blockchain brief's literal function signatures** (`msg.sender`-keyed `register`/`rotate`/`revoke`/`getKey(address)`, `serverSig`). The application's users hold no Ethereum wallets, so the registry is registrar-custodial and keyed by `keccak256(username)`. The deviation, what it preserves, and what it costs are set out in full in **§8.11(0)**. |
+| **Note on the blockchain brief** | The application uses conventional mailbox accounts rather than requiring each user to operate an Ethereum wallet, so `KeyRegistry` and `MessageReceipt` adapt the blockchain brief's interface accordingly. **§8.11(0)** explains the adaptation, the preserved guarantees, residual trust in the registrar, and how a wallet-owned design would differ. |
 
 ---
 
@@ -623,12 +623,15 @@ legacy data in tests — but no shipped call site passes empty AAD.
     distributed attacker; both accepted for scope.
 11. **`KeyRegistry`/`MessageReceipt` trust boundaries.**
 
-    **(0) DELIBERATE DEVIATION FROM THE BLOCKCHAIN BRIEF'S LITERAL
-    INTERFACE — stated plainly rather than left to be inferred.** The
-    contracts as built do **not** match the function signatures the
-    blockchain brief specifies. The brief describes a wallet-centric,
-    `msg.sender`-keyed interface; this implementation is
-    registrar-custodial and keyed by `keccak256(username)`:
+    **(0) Adaptation of the blockchain brief.** The application uses
+    conventional mailbox accounts rather than requiring each user to
+    operate an Ethereum wallet. Accordingly, `KeyRegistry` uses a
+    designated registrar and `keccak256(username)` identities instead of
+    `msg.sender`-owned address records. `MessageReceipt` authenticates the
+    server through the transaction signer rather than a separately
+    supplied signature. This section explains the preserved guarantees,
+    residual trust in the registrar, and how a wallet-owned design would
+    differ.
 
     | Brief's literal interface | As implemented | Why |
     |---|---|---|
@@ -665,7 +668,17 @@ legacy data in tests — but no shipped call site passes empty AAD.
     server's registrar wallet key; a compromised server can post arbitrary
     (mis)registrations as easily as it can lie off-chain — the value is
     *making a substitution publicly visible and non-repudiable*, not
-    preventing the server from acting maliciously. (a.1) **Revocation is
+    preventing the server from acting maliciously. Stated plainly: a
+    compromised registrar can publish a malicious first key for an
+    identity, or maliciously rotate an existing one, and the transparency
+    log does not independently authenticate that user — it only makes the
+    act publicly visible after the fact, not prevent it. (The two cases
+    differ in what "visible" buys an observer: a malicious *rotation* is
+    at least a detectable event against the prior on-chain version, which
+    is what the client-side registry check in (g) below catches; a
+    malicious *first* registration has no prior version to contradict, so
+    it is visible but not distinguishable from a legitimate one — this is
+    the same first-registration gap already stated in §8.1.) (a.1) **Revocation is
     implemented and live-verified on-chain** (`revokeKey`, exercised in the
     register→rotate→revoke lifecycle in `docs/test-plan.md`, and enforced
     by both clients' hard-block-on-encrypt gate, §8.11(g)) but is currently

@@ -4,13 +4,18 @@ Representative prompts from this project's AI-assisted development, kept for
 the module's **AI Prompt Artefacts** requirement. This is a short, curated
 appendix, not a development diary.
 
-**What is submitted for this requirement:** this log — eight representative
-exchanges chosen to show how the tool was directed, evaluated, and
-overridden — together with screenshots of the corresponding conversations.
-Full raw conversation transcripts are **not** submitted: they run to
-hundreds of exchanges, most of them routine, and the eight below plus the
-screenshots are the intended evidence. Each entry states the prompt, what
-the tool produced, my assessment of it, and what I changed as a result.
+**What is submitted, and against which requirement.** Two separate
+requirements are in play, satisfied by two different artefacts:
+
+- **Main epic brief — prompt artefacts.** This curated log and its
+  screenshots satisfy it: eight representative exchanges chosen to show how
+  the tool was directed, evaluated, and overridden. Each entry states the
+  prompt, what the tool produced, my assessment of it, and what I changed as
+  a result. Raw end-to-end transcripts of every session are not reproduced
+  here — they run to hundreds of exchanges, most of them routine.
+- **Dedicated blockchain brief.** Complete, unedited exports of the
+  blockchain design and implementation sessions are submitted separately,
+  alongside the repository ZIP and cover document.
 
 Tool used: Claude Code (Anthropic).
 

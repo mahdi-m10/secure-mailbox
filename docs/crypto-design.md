@@ -2,7 +2,7 @@
 
 | | |
 |---|---|
-| **Module** | CS4436/CS4455 Cybersecurity — Epic Project (July 2026 repeat) |
+| **Module** | CS4436/CS4455 Cybersecurity — Epic Project |
 | **Component** | Cryptography (Eoin O'Brien) |
 | **Version** | 1.0 |
 | **Status** | Describes the implementation as merged to `main`. Section 8 names known, accepted limitations honestly rather than hiding them; none are outstanding remediation work blocking submission. |
@@ -24,17 +24,15 @@ Three components share one wire-compatible encryption scheme:
 - **Web client** — HTML/JS using the Web Crypto API (`web-client/`).
 - **C++ desktop client** — libsodium + libcurl (`cpp-client/`).
 
-**Terminology note.** The codebase has been renamed from *message* terminology
-(`Message`, `/messages/send`, …) inherited from the previous iteration of the
-project to file terminology (`FileObject`, `/files/upload`, …); that rename is
-complete. Cryptographically a "file" is a byte string exactly like a "message",
-so nothing in this document changes because of it. This document uses mailbox
-terms (*upload*, *download*, *file*) throughout. One wire constant is
-deliberately **not** renamed: the HPKE `info` string is still the literal bytes
-`b"secure-messenger"` (`backend/crypto/hpke.py`, `web-client/js/crypto.js`) —
-it is an HKDF domain-separation label, not a user-facing term, and changing it
-would silently break interoperability with any ciphertext already produced
-under the old label.
+**Terminology note.** This document uses file/mailbox terms (*upload*,
+*download*, *file*, `FileObject`, `/files/upload`) consistently throughout.
+Cryptographically a "file" is a byte string like any other. One internal
+identifier is deliberately **not** phrased this way: the HPKE `info` string
+is the literal bytes `b"secure-messenger"` (`backend/crypto/hpke.py`,
+`web-client/js/crypto.js`) — it is an HKDF domain-separation label, not a
+user-facing term, and changing it would silently break interoperability
+with any ciphertext already produced under the current label, including
+live production data.
 
 **Scheme summary.** End-to-end encryption uses HPKE **Mode_Auth**
 (RFC 9180 [1]) assembled from vetted primitives:

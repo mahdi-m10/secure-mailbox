@@ -23,10 +23,10 @@
  * filename, a substituted sender key, or the wrong local key — all
  * fail closed with the same error.
  *
- * NOTE (deliberate): there is NO fallback to AAD-less decryption for legacy
- * ciphertexts. A fallback would let a malicious server strip relabelling
- * protection by making decryption downgrade. Files uploaded by the old
- * message client are not readable in this UI.
+ * NOTE (deliberate): there is NO fallback to AAD-less decryption. A fallback
+ * would let a malicious server strip relabelling protection by making
+ * decryption downgrade. Ciphertexts produced without an associated_data
+ * parameter are not readable in this UI.
  */
 
 import { API } from './config.js';

@@ -16,7 +16,7 @@ Tool used: Claude Code (Anthropic).
 
 ---
 
-## 1. Repository audit and pivot plan
+## 1. Repository audit and change plan
 
 **Prompt:** "Explore the inherited codebase and summarize what exists —
 backend routes, models, crypto, both clients. Flag anything that would fail

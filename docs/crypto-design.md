@@ -665,7 +665,13 @@ legacy data in tests — but no shipped call site passes empty AAD.
     server's registrar wallet key; a compromised server can post arbitrary
     (mis)registrations as easily as it can lie off-chain — the value is
     *making a substitution publicly visible and non-repudiable*, not
-    preventing the server from acting maliciously. (b) `MessageReceipt` proves
+    preventing the server from acting maliciously. (a.1) **Revocation is
+    implemented and live-verified on-chain** (`revokeKey`, exercised in the
+    register→rotate→revoke lifecycle in `docs/test-plan.md`, and enforced
+    by both clients' hard-block-on-encrypt gate, §8.11(g)) but is currently
+    exposed only via the operator script (`blockchain/scripts/revoke-key.js`),
+    not a user-facing endpoint — there is no in-app "revoke my key" action.
+    (b) `MessageReceipt` proves
     the server accepted a specific ciphertext at a specific time; it does
     NOT prove the server will keep serving it — a server can still simply
     withhold a file it never posted a receipt for, which the uploading

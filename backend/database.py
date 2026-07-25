@@ -6,24 +6,33 @@ SQLAlchemy 2.0 style:
   • Sessions managed via SessionLocal / get_db() dependency
 """
 
+import os
+
+from dotenv import load_dotenv
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker, DeclarativeBase
 
+load_dotenv()
+
 # ---------------------------------------------------------------------------
 # Database URL
-# The .db file will be created in the project root when the app starts.
-# Change this to a PostgreSQL / MySQL URL when moving to production.
+# Read from the DATABASE_URL environment variable (see .env.example); the
+# default below is used only when it is unset. The .db file is created in the
+# process's working directory on first start.
+# Set DATABASE_URL to a PostgreSQL / MySQL URL when moving to production.
 # ---------------------------------------------------------------------------
-DATABASE_URL = "sqlite:///./secure_messenger.db"
+DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./secure_mailbox.db")
+
+# SQLite needs check_same_thread=False (FastAPI serves requests on multiple
+# threads); other backends reject that argument, so only pass it for SQLite.
+_connect_args = {"check_same_thread": False} if DATABASE_URL.startswith("sqlite") else {}
 
 # ---------------------------------------------------------------------------
 # Engine
-# connect_args={"check_same_thread": False} is required for SQLite because
-# FastAPI runs requests on multiple threads.
 # ---------------------------------------------------------------------------
 engine = create_engine(
     DATABASE_URL,
-    connect_args={"check_same_thread": False},
+    connect_args=_connect_args,
     echo=False,          # set True to log every SQL statement (useful during dev)
 )
 

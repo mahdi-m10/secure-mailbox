@@ -178,6 +178,16 @@ function renderActiveTab() {
 // (MessageReceipt) — no per-row API call.
 const ETHERSCAN_TX = 'https://sepolia.etherscan.io/tx/';
 
+// The sender's optional "Note" (stored server-side as `subject`, in plaintext —
+// the upload modal says so). Shown to both sides: the uploader sees what they
+// wrote, the recipient sees the sender's description. Escaped, like every other
+// user-controlled value rendered into innerHTML.
+function fileNote(f) {
+  const note = (f.subject ?? '').trim();
+  if (!note) return '';
+  return `<div class="file-note" title="Note from the sender (stored unencrypted)">Note: ${esc(note)}</div>`;
+}
+
 function evidenceBadges(f) {
   const badge = (txHash, okLabel, title) => {
     if (txHash && txHash !== 'duplicate') {
@@ -211,6 +221,7 @@ function renderSharedRow(f) {
         from <strong>${esc(f.owner_username ?? 'unknown')}</strong>
         · ${fmtSize(f.size_bytes)} · ${fmtDate(f.created_at)}
       </div>
+      ${fileNote(f)}
       ${evidenceBadges(f)}
     </div>
     <div class="file-actions">
@@ -236,6 +247,7 @@ function renderOwnedRow(f) {
         to <strong>${esc(f.recipient_username ?? 'unknown')}</strong>
         · ${fmtSize(f.size_bytes)} · ${fmtDate(f.created_at)}
       </div>
+      ${fileNote(f)}
       ${evidenceBadges(f)}
     </div>
     <div class="file-actions">

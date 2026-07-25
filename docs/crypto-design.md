@@ -26,13 +26,19 @@ Three components share one wire-compatible encryption scheme:
 
 **Terminology note.** This document uses file/mailbox terms (*upload*,
 *download*, *file*, `FileObject`, `/files/upload`) consistently throughout.
-Cryptographically a "file" is a byte string like any other. One internal
-identifier is deliberately **not** phrased this way: the HPKE `info` string
-is the literal bytes `b"secure-messenger"` (`backend/crypto/hpke.py`,
-`web-client/js/crypto.js`) — it is an HKDF domain-separation label, not a
-user-facing term, and changing it would silently break interoperability
-with any ciphertext already produced under the current label, including
-live production data.
+Cryptographically a "file" is a byte string like any other. Two internal
+identifiers are deliberately **not** phrased this way, because they are
+load-bearing constants rather than user-facing terms, and changing either
+would silently break something already in production:
+
+- The HPKE `info` string is the literal bytes `b"secure-messenger"`
+  (`backend/crypto/hpke.py`, `web-client/js/crypto.js`) — an HKDF
+  domain-separation label baked into every ciphertext ever produced,
+  including live production data.
+- The web client's IndexedDB database name is the literal string
+  `'securemsg'` (`web-client/js/crypto.js`) — every browser that has ever
+  unlocked a vault in this app stores its wrapped private key and TOFU pin
+  store under that exact database name.
 
 **Scheme summary.** End-to-end encryption uses HPKE **Mode_Auth**
 (RFC 9180 [1]) assembled from vetted primitives:
@@ -218,7 +224,7 @@ decrypt call site (§8.11(f)–(g)).
 ### 4.3 Upload (encrypt) — HPKE Mode_Auth encapsulation
 
 Identical logic in `backend/crypto/hpke.py::encapsulate`,
-`web-client/js/crypto.js::encryptMessage`, `cpp-client` `hpke_encapsulate`.
+`web-client/js/crypto.js::encryptFile`, `cpp-client` `hpke_encapsulate`.
 
 ```
 Sender (holds skS; fetched pkR)
@@ -539,8 +545,8 @@ decrypt call site now binds the canonical AAD:
 
 Neither client falls back to AAD-less decryption on failure — a retry
 without AAD would let a malicious server strip the relabelling protection
-(downgrade attack). Deliberate consequence: ciphertexts uploaded by the
-pre-AAD message clients are no longer decryptable in the current clients.
+(downgrade attack). Deliberate consequence: ciphertexts uploaded by
+pre-AAD clients are no longer decryptable in the current clients.
 Verified end-to-end: relabelling a stored file's filename directly in the
 server database causes both clients' downloads to fail the GCM tag check,
 and cross-stack tests (C++↔Python↔Web Crypto) accept matching AAD and
@@ -585,7 +591,7 @@ legacy data in tests — but no shipped call site passes empty AAD.
 4. **AAD closes relabelling, not duplication** (§7): enforcement is live at
    every call site in both shipped clients. Same-pair *duplication* remains
    possible regardless, since the server-assigned file ID cannot be bound at
-   encrypt time. Ciphertexts from the pre-AAD message clients are no longer
+   encrypt time. Ciphertexts from pre-AAD clients are no longer
    decryptable in the current clients (deliberate — no downgrade fallback).
 5. **Metadata exposure** (§3(c)): social graph, timing, sizes, and plaintext
    subject/filename are visible to the server. Filenames could be
@@ -814,7 +820,7 @@ legacy data in tests — but no shipped call site passes empty AAD.
     attacker — a confidentiality property under key theft, not an
     availability property under ordinary rotation; (b) the key-rotation
     warning in `backend/routers/users.py`'s `rotate_key` docstring is about
-    the opposite direction — messages sent *to* a recipient **after** that
+    the opposite direction — files sent *to* a recipient **after** that
     recipient rotates but encrypted under their *old* fetched key — a
     transient in-flight problem the sender resolves by re-fetching. This
     limitation 12 is about the *sender* rotating and *already-delivered*

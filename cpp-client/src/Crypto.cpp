@@ -178,7 +178,7 @@ EncryptedFile hpke_encapsulate(const Bytes& plaintext,
     sodium_memzero(aes_key.data(), aes_key.size());
 
     // encrypted_key carries the ephemeral public key (ek_pub), not a wrapped
-    // message key.  The recipient re-derives the actual symmetric key via HKDF.
+    // content key.  The recipient re-derives the actual symmetric key via HKDF.
     return EncryptedFile{to_base64(ct), to_base64(nonce), to_base64(ek_pub)};
 }
 

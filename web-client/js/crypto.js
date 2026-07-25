@@ -96,6 +96,15 @@ export function importPublicKey(b64) {
 
 // ---- IndexedDB key storage --------------------------------------------------
 
+// _DB_NAME is a frozen, permanent constant — NOT a leftover to rename.
+// Every browser that has ever unlocked a vault in this app stores its
+// wrapped private key and TOFU pin store under this exact IndexedDB
+// database name. Changing it would orphan every existing user's stored
+// keys and pins on their next visit (indexedDB.open() looks up by exact
+// name), forcing key regeneration — which triggers the sender-key-rotation
+// limitation documented in crypto-design.md §8.12. Same treatment as the
+// HKDF info string in encapsulate()/decapsulate(): a wire/storage constant,
+// not a user-facing term.
 const _DB_NAME    = 'securemsg';
 const _DB_VERSION = 2;          // v2 adds the 'pins' store (TOFU)
 const _STORE      = 'keyring';
@@ -473,8 +482,10 @@ export async function encryptFile(plaintextBytes, recipientPublicKeyB64, senderP
   };
 }
 
-/** String convenience wrapper around encryptFile() (UTF-8 encodes first). */
-export async function encryptMessage(plaintext, recipientPublicKeyB64, senderPrivateKey, aad = null) {
+/** String convenience wrapper around encryptFile() (UTF-8 encodes first). Unused in the
+ *  app today (uploads always go through encryptFile with raw bytes) - kept for callers
+ *  that want to encrypt a text string directly without building a Uint8Array first. */
+export async function encryptText(plaintext, recipientPublicKeyB64, senderPrivateKey, aad = null) {
   return encryptFile(new TextEncoder().encode(plaintext),
                      recipientPublicKeyB64, senderPrivateKey, aad);
 }
@@ -521,10 +532,11 @@ export async function decryptFile(
 
 /**
  * String convenience wrapper around decryptFile() (UTF-8 decodes the result).
- * The legacy _nonceB64 parameter is unused — the nonce is re-derived from the
- * HPKE key schedule; kept for signature stability.
+ * Unused in the app today, same as encryptText() above. The legacy _nonceB64
+ * parameter is unused — the nonce is re-derived from the HPKE key schedule;
+ * kept for signature stability.
  */
-export async function decryptMessage(
+export async function decryptText(
   ciphertextB64, _nonceB64, encryptedKeyB64, recipientPrivKey, senderPublicKeyB64, aad = null
 ) {
   const bytes = await decryptFile(

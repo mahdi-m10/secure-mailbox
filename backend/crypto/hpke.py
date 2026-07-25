@@ -20,8 +20,8 @@ Public API
 Why not use Mode_Base?
 ----------------------
 Mode_Base is unauthenticated: any party can produce a ciphertext that
-passes the recipient's decryption.  An attacker who intercepts a message
-can replace it with their own message; the recipient has no way to tell.
+passes the recipient's decryption.  An attacker who intercepts a file
+can replace it with their own file; the recipient has no way to tell.
 
 Mode_Auth incorporates the sender's static private key into the shared
 secret derivation.  Only a party who holds ``sender_priv`` can produce a
@@ -59,7 +59,7 @@ Why the nonce is derived rather than random
 In our standalone aead.py, the nonce is generated with os.urandom(12)
 and transmitted alongside the ciphertext.  In HPKE, the nonce comes from
 the key schedule: HKDF mixes the ephemeral key (which is random) into the
-output, so the (aes_key, nonce) pair is unique per message without needing
+output, so the (aes_key, nonce) pair is unique per file without needing
 an additional random draw.  The nonce is therefore deterministic given
 (ek_priv, sender_priv, recipient_pub) but unpredictable to anyone who does
 not hold all three.
@@ -67,7 +67,7 @@ not hold all three.
 Trust model — TOFU
 ------------------
 HPKE Mode_Auth provides sender authentication, meaning Bob is guaranteed
-that a message decryptable with Alice's public key was produced by whoever
+that a file decryptable with Alice's public key was produced by whoever
 holds Alice's private key.  It does NOT guarantee that the public key
 stored as "Alice" in the database actually belongs to Alice.  That is the
 key distribution problem.
@@ -87,7 +87,7 @@ This is an acceptable trade-off for a university project because:
   1. The first-contact MitM requires active infrastructure access at a
      precise moment — a nation-state-level attack, not a passive attacker
      reading a database dump.
-  2. Mode_Auth stops the attacker from relaying forged messages: even if
+  2. Mode_Auth stops the attacker from relaying forged files: even if
      Eve captured Alice's trust-grant with Eve's own key, Eve cannot
      produce a valid Mode_Auth ciphertext that Bob will accept as from
      Alice (she does not hold Alice's private key).
@@ -289,7 +289,7 @@ def generate_keypair() -> tuple[bytes, bytes]:
         private_key:
             32-byte X25519 scalar.  Store securely on the client; never
             upload to the server.  Loss of this key means the user cannot
-            decrypt any messages received while it was active.
+            decrypt any files received while it was active.
 
         public_key:
             32-byte X25519 point (the Montgomery u-coordinate).  Upload to
@@ -334,7 +334,7 @@ def encapsulate(
         produce a valid ciphertext that passes the recipient's decapsulation
         with the corresponding ``sender_public_key``.
     plaintext:
-        The message bytes to encrypt.  The server never sees this value —
+        The file bytes to encrypt.  The server never sees this value —
         it is encrypted entirely on the sender's device before transmission.
         An empty plaintext (``b""``) is valid.
     info:
@@ -360,7 +360,7 @@ def encapsulate(
         ciphertext:
             AES-256-GCM encrypted plaintext with the 16-byte authentication
             tag appended.  Length = ``len(plaintext) + 16`` bytes.  Store in
-            ``messages.ciphertext`` (combined with ``encapsulated_key``).
+            ``files.ciphertext`` (combined with ``encapsulated_key``).
 
         encapsulated_key:
             32-byte ephemeral X25519 public key (ek_pub).  This is the
@@ -368,7 +368,7 @@ def encapsulate(
             recompute the same shared secret.  It is safe to store and
             transmit in plaintext — without ``recipient_private_key`` it
             yields no information about the AES key or plaintext.  Store
-            in ``messages.ciphertext`` prepended to *ciphertext*, or in a
+            in ``files.ciphertext`` prepended to *ciphertext*, or in a
             separate column.
 
     Raises
@@ -430,7 +430,7 @@ def encapsulate(
     ciphertext = AESGCM(aes_key).encrypt(nonce, plaintext, associated_data)
 
     # Return nonce alongside ciphertext and the encapsulated key so callers
-    # that submit to the messages API (which requires a separate nonce field)
+    # that submit to the files API (which requires a separate nonce field)
     # can include it without re-running the key schedule.
     # The recipient never uses the transmitted nonce — they re-derive it from
     # the same HKDF inputs and verify it implicitly via the GCM tag.
@@ -454,7 +454,7 @@ def decapsulate(
       - *recipient_private_key* is the private key matching the public key
         used during encapsulation.
       - *sender_public_key* is the public key matching the private key used
-        during encapsulation (the claimed sender actually sent this message).
+        during encapsulation (the claimed sender actually sent this file).
       - *encapsulated_key* was produced by the same encapsulate() call.
       - *ciphertext* has not been tampered with.
       - *info* matches the value used during encapsulation.

@@ -106,7 +106,7 @@ function renderResult({ msg, proof }) {
         ? 'Ciphertext matches the stored hash. Ethereum anchoring in progress.'
         : storedHash
           ? 'Hash mismatch — the ciphertext may have been altered after recording.'
-          : 'No integrity hash found for this message.';
+          : 'No integrity hash found for this file.';
 
   // Hash rows
   document.getElementById('hash-stored').textContent    = storedHash   || '(not present)';

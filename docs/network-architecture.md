@@ -46,7 +46,7 @@ in the project README.
   encrypted end-to-end (HPKE Mode_Auth, see `crypto-design.md`) before they
   ever reach TLS, so confidentiality does **not** depend on trusting the
   gateway or the server — TLS protects metadata and session tokens in
-  transit, not message contents.
+  transit, not file contents.
 
 ## 3. HTTP security controls (backend edge)
 

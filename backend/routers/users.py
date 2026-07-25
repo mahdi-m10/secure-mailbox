@@ -11,9 +11,9 @@ Routes
 Design rationale
 ----------------
 These endpoints exist to support HPKE key exchange.  Before Alice can send
-Bob an encrypted message she must fetch his X25519 public key.  The two
+Bob an encrypted file she must fetch his X25519 public key.  The two
 GET endpoints are intentionally unauthenticated — requiring a login to
-look up a public key would prevent a user from composing a message before
+look up a public key would prevent a user from encrypting a file before
 they have a valid access token, and public keys are, by definition, public.
 
 Privacy: the GET endpoints return only (id, username, public_key).  They
@@ -110,8 +110,8 @@ def get_user(
 
     No authentication required.
 
-    This is the primary key-discovery endpoint used before composing a
-    message: Alice calls ``GET /users/bob`` to retrieve Bob's X25519 public
+    This is the primary key-discovery endpoint used before encrypting a
+    file: Alice calls ``GET /users/bob`` to retrieve Bob's X25519 public
     key, which she passes to ``encapsulate()`` as ``recipient_public_key``.
 
     Returns 404 for both non-existent and inactive users — distinguishing
@@ -189,7 +189,7 @@ def upload_public_key(
     and use it as ``recipient_public_key`` in ``encapsulate()``.
 
     **Key rotation warning:** replacing a public key invalidates all
-    in-flight messages that were encrypted to the old key — senders who
+    in-flight files that were encrypted to the old key — senders who
     fetched the old key before the rotation cannot reach the user until
     they re-fetch.  Clients implementing TOFU will show a "key changed"
     warning to senders who stored the previous fingerprint.

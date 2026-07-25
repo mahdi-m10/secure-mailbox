@@ -56,10 +56,10 @@ Recipient (decapsulate):
 
 Why the nonce is derived rather than random
 --------------------------------------------
-In our standalone aead.py, the nonce is generated with os.urandom(12)
-and transmitted alongside the ciphertext.  In HPKE, the nonce comes from
-the key schedule: HKDF mixes the ephemeral key (which is random) into the
-output, so the (aes_key, nonce) pair is unique per file without needing
+A conventional AEAD scheme generates the nonce with os.urandom(12) and
+transmits it alongside the ciphertext.  In HPKE, the nonce comes from
+the key schedule instead: HKDF mixes the ephemeral key (which is random) into
+the output, so the (aes_key, nonce) pair is unique per file without needing
 an additional random draw.  The nonce is therefore deterministic given
 (ek_priv, sender_priv, recipient_pub) but unpredictable to anyone who does
 not hold all three.

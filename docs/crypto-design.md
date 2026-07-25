@@ -237,7 +237,9 @@ Sender (holds skS; fetched pkR)
                         L = 44)
      k ← okm[0..31]   (AES-256 key)
      n ← okm[32..43]  (96-bit GCM nonce)
-  4. ct ← AES-256-GCM-Encrypt(k, n, plaintext, aad = ∅)   ─ see §7 re: aad
+  4. ct ← AES-256-GCM-Encrypt(k, n, plaintext, aad = canonical_aad)
+     canonical_aad = "smx:v1:sender={me}:recipient={recipient}:filename={filename}"
+                                                              ─ see §7 re: aad
   5. zero skE, dh1, dh2, okm, k
   6. POST /files/upload { ciphertext: b64(ct), nonce: b64(n),
                           encrypted_key: b64(pkE), recipient }
@@ -257,9 +259,12 @@ Recipient (holds skR)
      dh2 ← X25519(skR, pkS)        =  sender's dh2
   3. (k, n) ← same HKDF call as §4.3 — the recipient RE-DERIVES the nonce
      and ignores the transmitted copy
-  4. pt ← AES-256-GCM-Decrypt(k, n, ct, aad = ∅)
+  4. canonical_aad ← rebuilt locally from (sender_username, me, filename)
+                                                    ─ never trust the server's copy
+     pt ← AES-256-GCM-Decrypt(k, n, ct, aad = canonical_aad)
      — fails closed (tag mismatch ⇒ error, zero plaintext released) if the
-       ciphertext, pkE, either public key, or the info string differ in any bit
+       ciphertext, pkE, either public key, the info string, or the AAD
+       differ in any bit
 ```
 
 A successful decrypt is an implicit proof that the file was produced by the
@@ -422,8 +427,11 @@ worth naming honestly rather than a claimed feature.
   `cryptography` have both) — cross-client interoperability decided it.
   Cost: the C++ client refuses to encrypt on CPUs without AES-NI rather than
   fall back to soft AES.
-- **Associated data: currently empty** — see §7, which is the honest,
-  load-bearing section on this.
+- **Associated data: bound and enforced at every call site in both shipped
+  clients** — the canonical `sender:recipient:filename` string (§7 has the
+  full rationale and verification evidence). No shipped call site passes
+  empty AAD; the crypto-layer parameter still *defaults* to none, kept only
+  so the primitives remain directly testable against legacy data in tests.
 
 ### 5.5 Password hashing: Argon2id
 

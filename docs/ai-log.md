@@ -42,6 +42,8 @@ roadmap for every chunk that followed.
 
 ## 2. Cryptographic design document
 
+![alt text](image-1.png)
+
 **Prompt:** "Draft the design doc: a threat model across four attacker
 classes stating explicitly what fails under full server compromise, a
 construction walkthrough, every primitive justified at parameter level
@@ -90,6 +92,8 @@ implemented" vs "enforcement live" — before accepting the chunk.
 
 ## 4. TOFU key pinning (web client)
 
+![alt text](image-2.png)
+
 **Prompt:** "Implement TOFU pinning for real, not as a documented
 limitation: pin a peer's key on first contact, hard-block with a warning on
 any later mismatch, and only proceed on an explicit, informed override."
@@ -109,6 +113,9 @@ where the gate was placed (both encrypt and decrypt paths, not just one).
 ---
 
 ## 5. C++ client key vault
+
+![alt text](image-8.png)
+![alt text](image-5.png)
 
 **Prompt:** "Argon2id-wrap the private key with parameters distinct from
 the server's login hashing. Confirm there is no fallback path that leaves
@@ -181,6 +188,8 @@ duplication test as a documented boundary rather than asking for it to be
 ---
 
 ## 8. Blockchain contracts: KeyRegistry + MessageReceipt
+
+![alt text](image-3.png)
 
 **Prompt:** "Build KeyRegistry and MessageReceipt to the full blockchain
 brief. Propose how identity works given our users hold no wallets. On the

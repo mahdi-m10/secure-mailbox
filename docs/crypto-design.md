@@ -254,7 +254,9 @@ Server: validates base64 shapes (nonce = 12 B, ct ≥ 16 B), packs and stores
 ```
 Recipient (holds skR)
   1. GET /files/{id}/download  → { b64(n ‖ ct), b64(pkE), sender_username, … }
-     GET /users/{sender}       → pkS            (see §3(d)1 — unpinned today)
+     GET /users/{sender}       → pkS   ─ gated through the TOFU pin store and
+                                         the on-chain registry check before use
+                                         (§3(d)1, §8.11(g))
   2. dh1 ← X25519(skR, pkE)        =  sender's dh1   (X25519 commutativity)
      dh2 ← X25519(skR, pkS)        =  sender's dh2
   3. (k, n) ← same HKDF call as §4.3 — the recipient RE-DERIVES the nonce

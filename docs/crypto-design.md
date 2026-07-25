@@ -2,9 +2,8 @@
 
 | | |
 |---|---|
-| **Module** | CS4436/CS4455 Cybersecurity — Epic Project |
+| **Module** | CS4436 Epic Module |
 | **Component** | Cryptography (Eoin O'Brien) |
-| **Version** | 1.0 |
 | **Status** | Describes the implementation as merged to `main`. Section 8 names known, accepted limitations honestly rather than hiding them; none are outstanding remediation work blocking submission. |
 | **Note on the blockchain brief** | The application uses conventional mailbox accounts rather than requiring each user to operate an Ethereum wallet, so `KeyRegistry` and `MessageReceipt` adapt the blockchain brief's interface accordingly. **§8.11(0)** explains the adaptation, the preserved guarantees, residual trust in the registrar, and how a wallet-owned design would differ. |
 
